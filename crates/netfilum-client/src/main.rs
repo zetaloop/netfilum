@@ -54,7 +54,7 @@ pub struct MountArgs {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("{error}");
+        netfilum::print_error("error", format_args!("{error}"));
         std::process::exit(1);
     }
 }

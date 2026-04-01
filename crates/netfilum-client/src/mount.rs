@@ -1,7 +1,7 @@
 use crate::path::windows_path_to_wsl;
 use crate::rpc_client::RpcClient;
 use crate::{MountArgs, UpArgs};
-use netfilum::print_status;
+use netfilum::{highlight, print_info};
 use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response,
 };
@@ -38,10 +38,10 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const FILE_DIRECTORY_FILE_FLAG: u32 = 0x0000_0001;
 
 pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    print_status(format_args!(
-        "netfilum: connecting to {} and preparing mount {}",
-        args.addr, args.mount
-    ));
+    print_info(
+        "mount",
+        format_args!("connecting to {}", highlight(args.addr)),
+    );
     let _fsp = winfsp_init()?;
     let client = RpcClient::new(args.addr);
     let descriptor = Arc::new(build_security_descriptor()?);
@@ -82,23 +82,34 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     let mut host = FileSystemHost::new(params, context)?;
     host.start()?;
     host.mount(args.mount.as_str())?;
-    print_status(format_args!(
-        "netfilum: mounted {} on {}. Press Ctrl+C to unmount.",
-        volume_label, args.mount
-    ));
+    print_info(
+        "mount",
+        format_args!(
+            "{} mounted on {} — Ctrl+C to unmount",
+            highlight(&volume_label),
+            highlight(&args.mount)
+        ),
+    );
 
     wait_for_shutdown()?;
-    print_status(format_args!("netfilum: unmounting {}", args.mount));
+    print_info(
+        "mount",
+        format_args!("unmounting {}", highlight(&args.mount)),
+    );
     host.unmount();
     host.stop();
     Ok(())
 }
 
 pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    print_status(format_args!(
-        "netfilum: starting netfilumd in WSL distro {} for {}",
-        args.distro, args.addr
-    ));
+    print_info(
+        "up",
+        format_args!(
+            "launching server in WSL {} at {}",
+            highlight(&args.distro),
+            highlight(args.addr)
+        ),
+    );
     let mut child = spawn_wsl_server(&args)?;
     let mount_args = MountArgs {
         mount: args.mount.clone(),
@@ -107,16 +118,16 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
     };
 
     let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        print_status(format_args!(
-            "netfilum: waiting for RPC server at {}",
-            args.addr
-        ));
+        print_info(
+            "up",
+            format_args!("waiting for server at {}", highlight(args.addr)),
+        );
         wait_for_server(args.addr, &mut child)?;
-        print_status(format_args!("netfilum: RPC server is ready"));
+        print_info("up", format_args!("server ready"));
         run_mount(mount_args)
     })();
 
-    print_status(format_args!("netfilum: stopping WSL helper process"));
+    print_info("up", format_args!("stopping server"));
     stop_wsl_server(&mut child);
     result
 }

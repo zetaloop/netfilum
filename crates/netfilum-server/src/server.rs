@@ -1,11 +1,11 @@
 use crate::path::normalize_relative_path;
 use filetime::{set_file_times, FileTime};
-use netfilum::print_status;
 use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
 };
 use netfilum::rpc::{read_message, write_message};
+use netfilum::{highlight, print_info};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -21,12 +21,15 @@ pub fn run(
     volume_label: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = expand_root(&root);
-    print_status(format_args!(
-        "netfilumd: exporting {} on {} with label {}",
-        root.display(),
-        addr,
-        volume_label
-    ));
+    print_info(
+        "serving",
+        format_args!(
+            "{} on {} as {}",
+            highlight(root.display()),
+            highlight(addr),
+            highlight(&volume_label)
+        ),
+    );
     let server = RpcServer::new(root, volume_label)?;
     server.serve(addr)?;
     Ok(())
