@@ -1,16 +1,20 @@
-use crate::protocol::{Request, Response, RpcError, RpcResult};
+use crate::protocol::RpcError;
+#[cfg(windows)]
+use crate::protocol::{Request, Response, RpcResult};
 use std::io::{self, Read, Write};
+#[cfg(windows)]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(windows)]
 use std::time::Duration;
 
-#[allow(dead_code)]
+#[cfg(windows)]
 #[derive(Debug, Clone)]
 pub struct RpcClient {
     addr: SocketAddr,
     timeout: Duration,
 }
 
-#[allow(dead_code)]
+#[cfg(windows)]
 impl RpcClient {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
@@ -57,11 +61,6 @@ fn encode_err(error: bincode::error::EncodeError) -> io::Error {
 
 fn decode_err(error: bincode::error::DecodeError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-}
-
-#[allow(dead_code)]
-pub fn ready(addr: SocketAddr, timeout: Duration) -> bool {
-    TcpStream::connect_timeout(&addr, timeout).is_ok()
 }
 
 impl From<RpcError> for io::Error {
