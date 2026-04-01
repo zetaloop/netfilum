@@ -13,10 +13,33 @@
 
 ```mermaid
 flowchart LR
-    A["Windows 应用<br/>资源管理器 / 编辑器"] --> B["netfilum<br/>WinFsp 挂载客户端"]
-    B --> C["自定义 RPC<br/>TCP + postcard"]
-    C --> D["netfilumd<br/>Linux / WSL 服务端"]
-    D --> E["导出目录<br/>std::fs"]
+    subgraph Win["Windows 侧"]
+        direction TB
+        Apps["文件管理器 / 其他应用"]
+        Mount["WinFsp 挂载盘符"]
+        Client["netfilum<br/>挂载客户端"]
+
+        Apps <--> Mount
+        Mount <--> Client
+    end
+
+    subgraph Wire["RPC 通道"]
+        direction TB
+        Rpc["长度前缀帧<br/>TCP + postcard"]
+    end
+
+    subgraph Linux["Linux / WSL 侧"]
+        direction TB
+        Server["netfilumd<br/>RPC 服务端"]
+        Dispatch["请求分发 / 路径约束<br/>文件语义映射"]
+        Fs["导出目录<br/>std::fs"]
+
+        Server <--> Dispatch
+        Dispatch <--> Fs
+    end
+
+    Win <--> Wire
+    Wire <--> Linux
 ```
 
 核心分工可以简单理解成这样：
