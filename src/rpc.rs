@@ -1,6 +1,9 @@
 use crate::protocol::RpcError;
 use std::io::{self, Read, Write};
 
+pub const CONNECTION_DATA: u8 = 0x00;
+pub const CONNECTION_MONITOR: u8 = 0x01;
+
 pub fn write_message<T: serde::Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()> {
     let bytes =
         bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(encode_err)?;

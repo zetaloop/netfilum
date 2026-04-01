@@ -4,8 +4,8 @@ use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
 };
-use netfilum::rpc::{read_message, write_message};
-use netfilum::{highlight, print_info};
+use netfilum::rpc::{read_message, write_message, CONNECTION_DATA, CONNECTION_MONITOR};
+use netfilum::{highlight, print_info, print_warn};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -14,6 +14,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn run(
@@ -59,14 +60,28 @@ impl RpcServer {
         listener.set_nonblocking(false)?;
 
         loop {
-            let (stream, _) = listener.accept()?;
-            if let Err(error) = self.handle_stream(stream) {
-                eprintln!("netfilum server connection failed: {error}");
+            let (mut stream, _) = listener.accept()?;
+            let mut tag = [0u8; 1];
+            if stream.read_exact(&mut tag).is_err() {
+                continue;
+            }
+            match tag[0] {
+                CONNECTION_DATA => {
+                    if let Err(error) = self.handle_data(stream) {
+                        print_warn("server", format_args!("connection failed: {error}"));
+                    }
+                }
+                CONNECTION_MONITOR => {
+                    thread::spawn(move || {
+                        let _ = wait_for_disconnect(&mut stream);
+                    });
+                }
+                _ => {}
             }
         }
     }
 
-    fn handle_stream(&self, mut stream: TcpStream) -> std::io::Result<()> {
+    fn handle_data(&self, mut stream: TcpStream) -> std::io::Result<()> {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -482,4 +497,15 @@ fn filesystem_capacity(path: &Path) -> std::io::Result<(u64, u64)> {
     let total_size = block_size.saturating_mul(stats.f_blocks);
     let free_size = block_size.saturating_mul(stats.f_bavail);
     Ok((total_size, free_size))
+}
+
+fn wait_for_disconnect(stream: &mut TcpStream) -> std::io::Result<()> {
+    let mut buf = [0u8; 1];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(_) => return Ok(()),
+        }
+    }
 }

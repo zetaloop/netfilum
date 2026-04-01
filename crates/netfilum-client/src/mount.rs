@@ -1,7 +1,7 @@
 use crate::path::windows_path_to_wsl;
-use crate::rpc_client::RpcClient;
+use crate::rpc_client::{MonitorConnection, RpcClient};
 use crate::{MountArgs, UpArgs};
-use netfilum::{highlight, print_info};
+use netfilum::{highlight, print_info, print_warn};
 use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response,
 };
@@ -9,8 +9,8 @@ use std::ffi::c_void;
 use std::io;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::thread;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
@@ -55,11 +55,16 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         }
     };
 
+    let mount_state = Arc::new(MountState::default());
+
     let context = RpcFsContext {
         client,
         security_descriptor: descriptor,
         volume_label: volume_label.clone(),
+        mount_state: Arc::clone(&mount_state),
     };
+
+    let watcher = spawn_connection_monitor(args.addr, Arc::clone(&mount_state))?;
 
     let mut params = VolumeParams::new();
     params
@@ -91,13 +96,18 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         ),
     );
 
-    wait_for_shutdown()?;
+    let shutdown_reason = wait_for_shutdown(Arc::clone(&mount_state))?;
+    if let ShutdownReason::ServerDisconnected(ref msg) = shutdown_reason {
+        print_warn("mount", format_args!("{msg}"));
+    }
     print_info(
         "mount",
         format_args!("unmounting {}", highlight(&args.mount)),
     );
     host.unmount();
     host.stop();
+    watcher.stop();
+    watcher.join();
     Ok(())
 }
 
@@ -231,6 +241,7 @@ struct RpcFsContext {
     client: RpcClient,
     security_descriptor: Arc<Vec<u8>>,
     volume_label: String,
+    mount_state: Arc<MountState>,
 }
 
 #[derive(Debug)]
@@ -616,27 +627,25 @@ impl FileSystemContext for RpcFsContext {
 }
 
 impl RpcFsContext {
+    fn send_request(&self, request: Request) -> winfsp::Result<Response> {
+        self.client
+            .send(&request)
+            .map_err(|error| map_rpc_error(error, &self.mount_state))
+    }
+
     fn fetch_attr(&self, path: &str) -> winfsp::Result<FileAttr> {
-        match self
-            .client
-            .send(&Request::Stat {
-                path: path.to_string(),
-            })
-            .map_err(FspError::from)?
-        {
+        match self.send_request(Request::Stat {
+            path: path.to_string(),
+        })? {
             Response::Attr(attr) => Ok(attr),
             _ => Err(FspError::from(io::Error::other("unexpected attr response"))),
         }
     }
 
     fn fetch_dir_entries(&self, path: &str) -> winfsp::Result<Vec<DirEntry>> {
-        match self
-            .client
-            .send(&Request::ReadDir {
-                path: path.to_string(),
-            })
-            .map_err(FspError::from)?
-        {
+        match self.send_request(Request::ReadDir {
+            path: path.to_string(),
+        })? {
             Response::DirEntries(entries) => Ok(entries),
             _ => Err(FspError::from(io::Error::other(
                 "unexpected directory response",
@@ -645,18 +654,112 @@ impl RpcFsContext {
     }
 }
 
-fn wait_for_shutdown() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let keep_running = Arc::new(AtomicBool::new(true));
-    let signal = Arc::clone(&keep_running);
+#[derive(Debug, Default)]
+struct MountState {
+    stop: AtomicBool,
+    disconnect_message: Mutex<Option<String>>,
+}
+
+impl MountState {
+    fn report_disconnect(&self, message: String) {
+        let mut slot = self.disconnect_message.lock().expect("lock poisoned");
+        if slot.is_none() {
+            *slot = Some(message);
+        }
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug)]
+enum ShutdownReason {
+    Interrupted,
+    ServerDisconnected(String),
+}
+
+struct ConnectionMonitor {
+    shutdown: MonitorConnection,
+    thread: JoinHandle<()>,
+}
+
+impl ConnectionMonitor {
+    fn stop(&self) {
+        let _ = self.shutdown.shutdown();
+    }
+
+    fn join(self) {
+        let _ = self.thread.join();
+    }
+}
+
+fn spawn_connection_monitor(
+    addr: std::net::SocketAddr,
+    mount_state: Arc<MountState>,
+) -> Result<ConnectionMonitor, Box<dyn std::error::Error + Send + Sync>> {
+    let monitor = MonitorConnection::connect(addr)?;
+    let shutdown = monitor.try_clone()?;
+    let thread = thread::spawn(move || {
+        let mut monitor = monitor;
+        match monitor.wait_for_disconnect() {
+            Ok(()) => {
+                if !mount_state.stop.load(Ordering::SeqCst) {
+                    mount_state.report_disconnect(format!(
+                        "lost connection to server at {addr}"
+                    ));
+                }
+            }
+            Err(error) if mount_state.stop.load(Ordering::SeqCst) => {
+                let _ = error;
+            }
+            Err(error) => {
+                mount_state.report_disconnect(format!(
+                    "monitor connection failed at {addr}: {error}"
+                ));
+            }
+        }
+    });
+    Ok(ConnectionMonitor { shutdown, thread })
+}
+
+fn wait_for_shutdown(
+    mount_state: Arc<MountState>,
+) -> Result<ShutdownReason, Box<dyn std::error::Error + Send + Sync>> {
+    let signal = Arc::clone(&mount_state);
     ctrlc::set_handler(move || {
-        signal.store(false, Ordering::SeqCst);
+        signal.stop.store(true, Ordering::SeqCst);
     })?;
 
-    while keep_running.load(Ordering::SeqCst) {
+    while !mount_state.stop.load(Ordering::SeqCst) {
         thread::sleep(SHUTDOWN_POLL);
     }
 
-    Ok(())
+    let message = mount_state
+        .disconnect_message
+        .lock()
+        .expect("lock poisoned")
+        .clone();
+    Ok(match message {
+        Some(msg) => ShutdownReason::ServerDisconnected(msg),
+        None => ShutdownReason::Interrupted,
+    })
+}
+
+fn map_rpc_error(error: io::Error, mount_state: &MountState) -> FspError {
+    if is_disconnect_error(&error) {
+        mount_state.report_disconnect(format!("lost connection to server: {error}"));
+    }
+    FspError::from(error)
+}
+
+fn is_disconnect_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn write_special_dir_entry(
