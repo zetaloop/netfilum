@@ -1,9 +1,9 @@
 use crate::protocol::RpcError;
 #[cfg(windows)]
 use crate::protocol::{Request, Response, RpcResult};
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
-use ring::pbkdf2;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -11,7 +11,6 @@ use socket2::SockRef;
 use std::io::{self, Read, Write};
 #[cfg(not(windows))]
 use std::net::TcpStream;
-use std::num::NonZeroU32;
 #[cfg(windows)]
 use std::net::{Shutdown, SocketAddr, TcpStream};
 #[cfg(windows)]
@@ -23,7 +22,9 @@ pub(crate) const AUTH_TOKEN: [u8; 16] = *b"netfilum-auth-v1";
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const SALT_LEN: usize = 16;
-const PBKDF2_ROUNDS: u32 = 100_000;
+const ARGON2_MEMORY_COST_KIB: u32 = 8 * 1024;
+const ARGON2_TIME_COST: u32 = 3;
+const ARGON2_LANES: u32 = 1;
 
 #[cfg(windows)]
 #[derive(Debug, Clone)]
@@ -233,14 +234,18 @@ fn connect_transport(
 }
 
 pub(crate) fn derive_transport_key(password: &str, salt: &[u8; SALT_LEN]) -> [u8; KEY_LEN] {
+    let params = Params::new(
+        ARGON2_MEMORY_COST_KIB,
+        ARGON2_TIME_COST,
+        ARGON2_LANES,
+        Some(KEY_LEN),
+    )
+    .expect("argon2 params must be valid");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; KEY_LEN];
-    pbkdf2::derive(
-        pbkdf2::PBKDF2_HMAC_SHA256,
-        NonZeroU32::new(PBKDF2_ROUNDS).expect("PBKDF2 rounds must be non-zero"),
-        salt,
-        password.as_bytes(),
-        &mut key,
-    );
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .expect("argon2 key derivation must succeed");
     key
 }
 
@@ -304,5 +309,18 @@ fn codec_err(error: postcard::Error) -> io::Error {
 impl From<RpcError> for io::Error {
     fn from(value: RpcError) -> Self {
         value.to_io_error()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KEY_LEN, SALT_LEN, derive_transport_key};
+
+    #[test]
+    fn derives_stable_transport_key() {
+        let salt = [7u8; SALT_LEN];
+        let key = derive_transport_key("demo-pass", &salt);
+        assert_eq!(key.len(), KEY_LEN);
+        assert_eq!(key, derive_transport_key("demo-pass", &salt));
     }
 }
