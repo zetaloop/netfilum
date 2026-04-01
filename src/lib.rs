@@ -20,7 +20,7 @@ const DEFAULT_WSL_ROOT: &str = "/home/$USER/netfilum-root";
 
 #[derive(Debug, Parser)]
 #[command(name = "netfilum")]
-#[command(about = "A coursework RPC network file system for Windows + WSL")]
+#[command(about = "A coursework RPC network file system client")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -29,7 +29,6 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Up(UpArgs),
-    Server(ServerArgs),
     Mount(MountArgs),
 }
 
@@ -48,6 +47,8 @@ pub struct UpArgs {
 }
 
 #[derive(Debug, Clone, Parser)]
+#[command(name = "netfilumd")]
+#[command(about = "A coursework RPC network file system daemon")]
 pub struct ServerArgs {
     #[arg(long, default_value = DEFAULT_WSL_ROOT)]
     pub root: String,
@@ -67,12 +68,15 @@ pub struct MountArgs {
     pub volume_label: String,
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run_client() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match Cli::parse().command {
         Command::Up(args) => run_up(args),
-        Command::Server(args) => server::run(args),
         Command::Mount(args) => run_mount(args),
     }
+}
+
+pub fn run_daemon() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    server::run(ServerArgs::parse())
 }
 
 fn run_up(_args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

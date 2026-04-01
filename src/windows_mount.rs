@@ -112,7 +112,7 @@ fn spawn_wsl_server(args: &UpArgs) -> Result<Child, Box<dyn std::error::Error + 
         shell_quote(&args.root)
     };
     let command = format!(
-        "set -e; cd {}; cargo run --quiet -- server --root {} --addr {} --volume-label {}",
+        "set -e; cd {}; cargo run --quiet --bin netfilumd -- --root {} --addr {} --volume-label {}",
         shell_quote(&workspace),
         root,
         shell_quote(&args.addr.to_string()),
