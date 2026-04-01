@@ -20,6 +20,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -50,7 +51,7 @@ pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sy
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RpcServer {
     root: PathBuf,
     root_real: PathBuf,
@@ -76,9 +77,14 @@ impl RpcServer {
 
         loop {
             let (stream, _) = listener.accept()?;
-            if let Err(error) = self.handle_stream(stream) {
-                print_error(format_args!("netfilumd: connection failed: {error}"));
-            }
+            let server = self.clone();
+            thread::spawn(move || {
+                if let Err(error) = server.handle_stream(stream)
+                    && !is_client_disconnect(&error)
+                {
+                    print_error(format_args!("netfilumd: connection failed: {error}"));
+                }
+            });
         }
     }
 
@@ -100,9 +106,20 @@ impl RpcServer {
         };
         write_message(&mut stream, &auth_result)?;
         auth_result.map_err(std::io::Error::from)?;
-        let request: Request = read_encrypted_message(&mut stream, &key)?;
-        let response = self.dispatch(request);
-        write_encrypted_message(&mut stream, &key, &response)
+
+        loop {
+            let request: Request = match read_encrypted_message(&mut stream, &key) {
+                Ok(request) => request,
+                Err(error) if is_client_disconnect(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            let response = self.dispatch(request);
+            match write_encrypted_message(&mut stream, &key, &response) {
+                Ok(()) => {}
+                Err(error) if is_client_disconnect(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn dispatch(&self, request: Request) -> RpcResult<Response> {
@@ -438,6 +455,16 @@ impl RpcServer {
             ))
         }
     }
+}
+
+fn is_client_disconnect(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn expand_root(raw: &str) -> PathBuf {

@@ -10,6 +10,8 @@ use std::io::{self, Read, Write};
 #[cfg(windows)]
 use std::net::{SocketAddr, TcpStream};
 #[cfg(windows)]
+use std::sync::{Arc, Mutex};
+#[cfg(windows)]
 use std::time::Duration;
 
 pub(crate) const AUTH_TOKEN: [u8; 16] = *b"netfilum-auth-v1";
@@ -24,6 +26,14 @@ pub struct RpcClient {
     addr: SocketAddr,
     timeout: Duration,
     password: String,
+    session: Arc<Mutex<Option<RpcSession>>>,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct RpcSession {
+    stream: TcpStream,
+    key: [u8; KEY_LEN],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,24 +59,55 @@ impl RpcClient {
             addr,
             timeout: Duration::from_secs(5),
             password,
+            session: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn send(&self, request: &Request) -> io::Result<Response> {
-        let mut stream = TcpStream::connect(self.addr)?;
+        let mut session = self.session.lock().expect("rpc session lock poisoned");
+        if session.is_none() {
+            *session = Some(RpcSession::connect(
+                self.addr,
+                self.timeout,
+                &self.password,
+            )?);
+        }
+
+        match session
+            .as_mut()
+            .expect("rpc session missing after initialization")
+            .send(request)
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(error.to_io_error()),
+            Err(error) => {
+                *session = None;
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl RpcSession {
+    fn connect(addr: SocketAddr, timeout: Duration, password: &str) -> io::Result<Self> {
+        let mut stream = TcpStream::connect(addr)?;
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(self.timeout))?;
-        stream.set_write_timeout(Some(self.timeout))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
 
         let hello: ServerHello = read_message(&mut stream)?;
-        let key = derive_transport_key(&self.password, &hello.salt);
+        let key = derive_transport_key(password, &hello.salt);
         write_encrypted_message(&mut stream, &key, &AuthRequest { token: AUTH_TOKEN })?;
         let auth_result: RpcResult<()> = read_message(&mut stream)?;
         auth_result.map_err(|error| error.to_io_error())?;
 
-        write_encrypted_message(&mut stream, &key, request)?;
-        let response: RpcResult<Response> = read_encrypted_message(&mut stream, &key)?;
-        response.map_err(|error| error.to_io_error())
+        Ok(Self { stream, key })
+    }
+
+    fn send(&mut self, request: &Request) -> io::Result<RpcResult<Response>> {
+        write_encrypted_message(&mut self.stream, &self.key, request)?;
+        read_encrypted_message(&mut self.stream, &self.key)
     }
 }
 
