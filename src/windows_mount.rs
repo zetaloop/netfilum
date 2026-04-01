@@ -37,6 +37,10 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const FILE_DIRECTORY_FILE_FLAG: u32 = 0x0000_0001;
 
 pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    eprintln!(
+        "netfilum: connecting to {} and preparing mount {}",
+        args.addr, args.mount
+    );
     let _fsp = winfsp_init()?;
     let client = RpcClient::new(args.addr);
     let descriptor = Arc::new(build_security_descriptor()?);
@@ -53,7 +57,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     let context = RpcFsContext {
         client,
         security_descriptor: descriptor,
-        volume_label,
+        volume_label: volume_label.clone(),
     };
 
     let mut params = VolumeParams::new();
@@ -77,14 +81,23 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     let mut host = FileSystemHost::new(params, context)?;
     host.start()?;
     host.mount(args.mount.as_str())?;
+    eprintln!(
+        "netfilum: mounted {} on {}. Press Ctrl+C to unmount.",
+        volume_label, args.mount
+    );
 
     wait_for_shutdown()?;
+    eprintln!("netfilum: unmounting {}", args.mount);
     host.unmount();
     host.stop();
     Ok(())
 }
 
 pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    eprintln!(
+        "netfilum: starting netfilumd in WSL distro {} for {}",
+        args.distro, args.addr
+    );
     let mut child = spawn_wsl_server(&args)?;
     let mount_args = MountArgs {
         mount: args.mount.clone(),
@@ -93,10 +106,13 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
     };
 
     let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        eprintln!("netfilum: waiting for RPC server at {}", args.addr);
         wait_for_server(args.addr, &mut child)?;
+        eprintln!("netfilum: RPC server is ready");
         run_mount(mount_args)
     })();
 
+    eprintln!("netfilum: stopping WSL helper process");
     stop_wsl_server(&mut child);
     result
 }

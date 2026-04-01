@@ -19,6 +19,12 @@ const DEFAULT_VOLUME_SIZE: u64 = 1 << 40;
 
 pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = expand_root(&args.root);
+    eprintln!(
+        "netfilumd: exporting {} on {} with label {}",
+        root.display(),
+        args.addr,
+        args.volume_label
+    );
     let server = RpcServer::new(root, args.volume_label)?;
     server.serve(args.addr)?;
     Ok(())
