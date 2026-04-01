@@ -7,6 +7,8 @@ mod server;
 mod windows_mount;
 
 use clap::{Parser, Subcommand};
+use std::fmt;
+use std::io::Write as _;
 use std::net::SocketAddr;
 
 pub use path::{normalize_relative_path, windows_path_to_wsl};
@@ -77,6 +79,13 @@ pub fn run_client() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 pub fn run_daemon() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     server::run(ServerArgs::parse())
+}
+
+pub(crate) fn print_status(args: fmt::Arguments<'_>) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_fmt(args);
+    let _ = stdout.write_all(b"\r\n");
+    let _ = stdout.flush();
 }
 
 fn run_up(_args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

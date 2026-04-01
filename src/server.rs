@@ -1,5 +1,6 @@
 use crate::ServerArgs;
 use crate::path::normalize_relative_path;
+use crate::print_status;
 use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
@@ -19,12 +20,12 @@ const DEFAULT_VOLUME_SIZE: u64 = 1 << 40;
 
 pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = expand_root(&args.root);
-    eprintln!(
+    print_status(format_args!(
         "netfilumd: exporting {} on {} with label {}",
         root.display(),
         args.addr,
         args.volume_label
-    );
+    ));
     let server = RpcServer::new(root, args.volume_label)?;
     server.serve(args.addr)?;
     Ok(())
