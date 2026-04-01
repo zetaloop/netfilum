@@ -13,6 +13,7 @@ const DEFAULT_WSL_ROOT: &str = "/home/$USER/netfilum-root";
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "netfilumd")]
+#[command(version)]
 #[command(about = "A coursework RPC network file system daemon")]
 struct ServerArgs {
     #[arg(long, default_value = DEFAULT_WSL_ROOT)]

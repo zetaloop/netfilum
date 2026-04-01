@@ -16,6 +16,7 @@ const DEFAULT_WSL_ROOT: &str = "/home/$USER/netfilum-root";
 
 #[derive(Debug, Parser)]
 #[command(name = "netfilum")]
+#[command(version)]
 #[command(about = "A coursework RPC network file system client")]
 struct Cli {
     #[command(subcommand)]
