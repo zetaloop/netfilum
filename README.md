@@ -4,10 +4,10 @@
 
 程序分为两端：
 
-- `netfilum`：Windows 客户端，负责通过 WinFsp 挂载盘符
-- `netfilumd`：Linux / WSL 服务端，负责导出一个目录并响应 RPC 请求
+- `netfilum`：Windows 客户端，通过 WinFsp 挂载盘符
+- `netfilumd`：Linux / WSL 服务端，将指定目录作为文件服务提供给客户端
 
-同机 Windows + WSL 场景可使用 `netfilum up` 快捷启动。它会通过 `wsl.exe` 启动与 `netfilum.exe` 同目录的 `netfilumd`，然后执行挂载。
+`netfilum up` 会自动在 WSL 中启动与 `netfilum.exe` 同目录下的 `netfilumd`，然后完成挂载。
 
 ## 架构
 
@@ -32,7 +32,7 @@ flowchart LR
         direction TB
         Server["netfilumd<br/>RPC 服务端"]
         Dispatch["请求分发 / 路径约束<br/>文件语义映射"]
-        Fs["导出目录<br/>std::fs"]
+        Fs["服务目录<br/>std::fs"]
 
         Server <--> Dispatch
         Dispatch <--> Fs
@@ -42,22 +42,22 @@ flowchart LR
     Wire <--> Linux
 ```
 
-核心分工可以简单理解成这样：
+核心分工：
 
-- `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射，是这个项目自己实现的
-- WinFsp 负责把 Windows 用户态文件系统接到盘符上，让 `netfilum` 能作为一个可挂载盘工作
-- `serde`、`postcard`、`argon2`、`aes-gcm` 负责消息编解码和口令派生的传输加密，`clap` 负责命令行解析，`filetime` 负责时间戳设置
-- 服务端真正落到磁盘上的文件操作，底层使用的是 Rust 标准库 `std::fs`
+- RPC 协议、请求分发、路径约束、文件语义映射由本项目实现
+- WinFsp 将 Windows 用户态文件系统映射到盘符，让 `netfilum` 作为一个可挂载盘工作
+- `serde`、`postcard`、`argon2`、`aes-gcm` 负责消息的编解码和传输加密，`clap` 负责命令行解析，`filetime` 负责时间戳设置
+- 服务端的磁盘读写通过 Rust 标准库 `std::fs` 完成
 
 ## 运行前提
 
 - Windows 侧已安装 WinFsp
-- 客户端能够连到服务端的地址和端口
-- 客户端与服务端需要使用同一个 `--password`
+- 客户端能连接到服务端的地址和端口
+- 客户端与服务端使用同一个 `--password`
 
 默认地址是 `127.0.0.1:4040`，默认卷标是 `netfilum`。
 
-如果不传 `--password`，两端仍会启动，但会退化为基于空字符串派生的密钥，只适合同机演示。
+如果不传 `--password`，两端仍会启动，但会用空字符串派生密钥，只适合本机演示。
 
 ## 从源码构建
 
@@ -94,11 +94,11 @@ netfilumd --root /home/$USER/netfilum-root --addr 127.0.0.1:4040 --volume-label 
 netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum --password secret
 ```
 
-如果服务端在另一台 Linux 机器上，把 `127.0.0.1:4040` 换成可达地址即可。
+如果服务端在另一台机器上，把 `127.0.0.1:4040` 换成对应的地址即可。
 
-## 本机 WSL 快捷启动
+## 一键启动（Windows + WSL）
 
-同机 Windows + WSL 场景可以直接用：
+如果服务端跑在本机 WSL 里，可以直接用：
 
 ```bash
 netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 127.0.0.1:4040 --password secret
@@ -106,12 +106,12 @@ netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 1
 
 这条命令会：
 
-1. 在指定的 WSL 发行版里启动与 `netfilum.exe` 同目录的 `netfilumd`
-2. 等待 RPC 服务就绪
+1. 在指定的 WSL 发行版里启动与 `netfilum.exe` 同目录下的 `netfilumd`
+2. 等待服务就绪
 3. 在 Windows 上挂载盘符
-4. 当前进程结束时卸载盘符并停止刚刚拉起的服务端
+4. 进程结束时卸载盘符并停止服务端
 
-使用 `up` 时，需要把 Windows 客户端 `netfilum.exe` 和 Linux / WSL 服务端 `netfilumd` 放在同一个目录里，并且该目录能被 WSL 访问到。
+使用 `up` 时，需要把 `netfilum.exe` 和 `netfilumd` 放在同一个目录里，并且该目录在 WSL 中可以访问。
 
 ## 说明
 
@@ -121,6 +121,6 @@ netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 1
 
 - 单用户
 - 单客户端挂载
-- 传输加密只依赖共享口令，不做身份认证
+- 传输加密只依赖共享口令，不进行身份认证
 - 无文件锁
 - 无 symlink / hardlink / mmap
