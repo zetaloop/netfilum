@@ -194,9 +194,8 @@ mod tests {
             file_attributes: 0,
             allocation_size: 32,
         };
-        let encoded = bincode::serde::encode_to_vec(&request, bincode::config::standard()).unwrap();
-        let (decoded, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        let encoded = postcard::to_allocvec(&request).unwrap();
+        let decoded = postcard::from_bytes(&encoded).unwrap();
         assert_eq!(request, decoded);
 
         let response: RpcResult<Response> = Ok(Response::Attr(FileAttr {
@@ -211,10 +210,8 @@ mod tests {
             mode: Some(0o644),
         }));
 
-        let encoded =
-            bincode::serde::encode_to_vec(&response, bincode::config::standard()).unwrap();
-        let (decoded, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        let encoded = postcard::to_allocvec(&response).unwrap();
+        let decoded = postcard::from_bytes(&encoded).unwrap();
         assert_eq!(response, decoded);
     }
 }

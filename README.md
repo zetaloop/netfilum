@@ -14,7 +14,7 @@
 ```mermaid
 flowchart LR
     A["Windows 应用<br/>资源管理器 / 编辑器"] --> B["netfilum<br/>WinFsp 挂载客户端"]
-    B --> C["自定义 RPC<br/>TCP + bincode"]
+    B --> C["自定义 RPC<br/>TCP + postcard"]
     C --> D["netfilumd<br/>Linux / WSL 服务端"]
     D --> E["导出目录<br/>std::fs"]
 ```
@@ -23,7 +23,7 @@ flowchart LR
 
 - `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射，是这个项目自己实现的
 - WinFsp 负责把 Windows 用户态文件系统接到盘符上，让 `netfilum` 能作为一个可挂载盘工作
-- `serde` 和 `bincode` 负责消息编解码，`clap` 负责命令行解析，`filetime` 负责时间戳设置
+- `serde` 和 `postcard` 负责消息编解码，`clap` 负责命令行解析，`filetime` 负责时间戳设置
 - 服务端真正落到磁盘上的文件操作，底层使用的是 Rust 标准库 `std::fs`
 
 ## 运行前提
