@@ -255,8 +255,7 @@ pub(crate) fn write_encrypted_message<T: serde::Serialize>(
     key: &[u8; KEY_LEN],
     value: &T,
 ) -> io::Result<()> {
-    let plaintext =
-        bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(encode_err)?;
+    let plaintext = postcard::to_allocvec(value).map_err(codec_err)?;
     let nonce = random_bytes::<NONCE_LEN>()?;
     let cipher = ChaCha20Poly1305::new_from_slice(key)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -276,14 +275,12 @@ pub(crate) fn read_encrypted_message<T: serde::de::DeserializeOwned>(
     let plaintext = cipher
         .decrypt(Nonce::from_slice(&packet.nonce), packet.ciphertext.as_ref())
         .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))?;
-    let (value, _) = bincode::serde::decode_from_slice(&plaintext, bincode::config::standard())
-        .map_err(decode_err)?;
+    let value = postcard::from_bytes(&plaintext).map_err(codec_err)?;
     Ok(value)
 }
 
 pub fn write_message<T: serde::Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()> {
-    let bytes =
-        bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(encode_err)?;
+    let bytes = postcard::to_allocvec(value).map_err(codec_err)?;
     let len = bytes.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&bytes)?;
@@ -296,16 +293,11 @@ pub fn read_message<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> i
     let len = u32::from_le_bytes(len_bytes) as usize;
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload)?;
-    let (value, _) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-        .map_err(decode_err)?;
+    let value = postcard::from_bytes(&payload).map_err(codec_err)?;
     Ok(value)
 }
 
-fn encode_err(error: bincode::error::EncodeError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-}
-
-fn decode_err(error: bincode::error::DecodeError) -> io::Error {
+fn codec_err(error: postcard::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
