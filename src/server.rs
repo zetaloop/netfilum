@@ -1,6 +1,5 @@
 use crate::ServerArgs;
 use crate::path::normalize_relative_path;
-use crate::print_status;
 use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
@@ -9,6 +8,7 @@ use crate::rpc::{
     AUTH_TOKEN, AuthRequest, ServerHello, derive_transport_key, random_bytes,
     read_encrypted_message, write_encrypted_message, write_message,
 };
+use crate::{print_error, print_info, print_warn};
 use filetime::{FileTime, set_file_times};
 #[cfg(unix)]
 use std::ffi::CString;
@@ -30,15 +30,19 @@ const DEFAULT_VOLUME_SIZE: u64 = 1 << 40;
 
 pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = expand_root(&args.root);
-    print_status(format_args!(
+    print_info(format_args!(
         "netfilumd: exporting {} on {} with label {}",
         root.display(),
         args.addr,
         args.volume_label
     ));
     if args.password.is_empty() {
-        print_status(format_args!(
+        print_warn(format_args!(
             "netfilumd: warning: empty password configured, transport is encrypted but not secret"
+        ));
+    } else {
+        print_info(format_args!(
+            "netfilumd: password authentication and encrypted transport enabled"
         ));
     }
     let server = RpcServer::new(root, args.volume_label, args.password)?;
@@ -73,7 +77,7 @@ impl RpcServer {
         loop {
             let (stream, _) = listener.accept()?;
             if let Err(error) = self.handle_stream(stream) {
-                eprintln!("netfilum server connection failed: {error}");
+                print_error(format_args!("netfilumd: connection failed: {error}"));
             }
         }
     }

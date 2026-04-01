@@ -3,7 +3,7 @@ use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response,
 };
 use crate::rpc::RpcClient;
-use crate::{MountArgs, UpArgs, print_status};
+use crate::{MountArgs, UpArgs, print_info, print_warn};
 use std::ffi::c_void;
 use std::io;
 use std::process::{Child, Command, Stdio};
@@ -41,13 +41,17 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const FILE_DIRECTORY_FILE_FLAG: u32 = 0x0000_0001;
 
 pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    print_status(format_args!(
+    print_info(format_args!(
         "netfilum: connecting to {} and preparing mount {}",
         args.addr, args.mount
     ));
     if args.password.is_empty() {
-        print_status(format_args!(
+        print_warn(format_args!(
             "netfilum: warning: empty password configured, transport is encrypted but not secret"
+        ));
+    } else {
+        print_info(format_args!(
+            "netfilum: password authentication and encrypted transport enabled"
         ));
     }
     let _fsp = winfsp_init()?;
@@ -94,18 +98,18 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     let mut host = FileSystemHost::new(params, context)?;
     host.start()?;
     host.mount(args.mount.as_str())?;
-    print_status(format_args!(
+    print_info(format_args!(
         "netfilum: mounted {} on {}. Press Ctrl+C to unmount.",
         volume_label, args.mount
     ));
 
     let shutdown_reason = wait_for_shutdown(Arc::clone(&mount_state))?;
     if let ShutdownReason::ServerDisconnected(message) = shutdown_reason {
-        print_status(format_args!("{message}"));
+        print_warn(format_args!("{message}"));
     }
 
     mount_state.stop.store(true, Ordering::SeqCst);
-    print_status(format_args!("netfilum: unmounting {}", args.mount));
+    print_info(format_args!("netfilum: unmounting {}", args.mount));
     host.unmount();
     host.stop();
     let _ = watcher.join();
@@ -113,7 +117,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
 }
 
 pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    print_status(format_args!(
+    print_info(format_args!(
         "netfilum: starting netfilumd in WSL distro {} for {}",
         args.distro, args.addr
     ));
@@ -126,16 +130,16 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
     };
 
     let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        print_status(format_args!(
+        print_info(format_args!(
             "netfilum: waiting for RPC server at {}",
             args.addr
         ));
         wait_for_server(args.addr, &args.password, &mut child)?;
-        print_status(format_args!("netfilum: RPC server is ready"));
+        print_info(format_args!("netfilum: RPC server is ready"));
         run_mount(mount_args)
     })();
 
-    print_status(format_args!("netfilum: stopping WSL helper process"));
+    print_info(format_args!("netfilum: stopping WSL helper process"));
     stop_wsl_server(&mut child);
     result
 }

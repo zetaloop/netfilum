@@ -88,11 +88,30 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     server::run(ServerArgs::parse())
 }
 
-pub(crate) fn print_status(args: fmt::Arguments<'_>) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_fmt(args);
-    let _ = stdout.write_all(b"\r\n");
-    let _ = stdout.flush();
+pub fn print_info(args: fmt::Arguments<'_>) {
+    print_line("INFO", args, false);
+}
+
+pub fn print_warn(args: fmt::Arguments<'_>) {
+    print_line("WARN", args, false);
+}
+
+pub fn print_error(args: fmt::Arguments<'_>) {
+    print_line("ERROR", args, true);
+}
+
+fn print_line(level: &str, args: fmt::Arguments<'_>, stderr: bool) {
+    if stderr {
+        let mut handle = std::io::stderr().lock();
+        let _ = handle.write_fmt(format_args!("[{level}] {args}"));
+        let _ = handle.write_all(b"\r\n");
+        let _ = handle.flush();
+    } else {
+        let mut handle = std::io::stdout().lock();
+        let _ = handle.write_fmt(format_args!("[{level}] {args}"));
+        let _ = handle.write_all(b"\r\n");
+        let _ = handle.flush();
+    }
 }
 
 fn run_up(_args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
