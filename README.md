@@ -25,7 +25,7 @@ flowchart LR
 
     subgraph Wire["RPC 通道"]
         direction TB
-        Rpc["长度前缀帧<br/>TCP + postcard"]
+        Rpc["长度前缀帧<br/>TCP + AES-256-GCM + postcard"]
     end
 
     subgraph Linux["Linux / WSL 侧"]
@@ -46,15 +46,18 @@ flowchart LR
 
 - `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射，是这个项目自己实现的
 - WinFsp 负责把 Windows 用户态文件系统接到盘符上，让 `netfilum` 能作为一个可挂载盘工作
-- `serde` 和 `postcard` 负责消息编解码，`clap` 负责命令行解析，`filetime` 负责时间戳设置
+- `serde`、`postcard`、`argon2`、`aes-gcm` 负责消息编解码和口令派生的传输加密，`clap` 负责命令行解析，`filetime` 负责时间戳设置
 - 服务端真正落到磁盘上的文件操作，底层使用的是 Rust 标准库 `std::fs`
 
 ## 运行前提
 
 - Windows 侧已安装 WinFsp
 - 客户端能够连到服务端的地址和端口
+- 客户端与服务端需要使用同一个 `--password`
 
 默认地址是 `127.0.0.1:4040`，默认卷标是 `netfilum`。
+
+如果不传 `--password`，两端仍会启动，但会退化为基于空字符串派生的密钥，只适合同机演示。
 
 ## 从源码构建
 
@@ -82,13 +85,13 @@ cargo build --release -p netfilum-server
 先在 Linux / WSL 上启动服务端：
 
 ```bash
-netfilumd --root /home/$USER/netfilum-root --addr 127.0.0.1:4040 --volume-label netfilum
+netfilumd --root /home/$USER/netfilum-root --addr 127.0.0.1:4040 --volume-label netfilum --password secret
 ```
 
 再在 Windows 上挂载盘符：
 
 ```bash
-netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum
+netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum --password secret
 ```
 
 如果服务端在另一台 Linux 机器上，把 `127.0.0.1:4040` 换成可达地址即可。
@@ -98,7 +101,7 @@ netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum
 同机 Windows + WSL 场景可以直接用：
 
 ```bash
-netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 127.0.0.1:4040
+netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 127.0.0.1:4040 --password secret
 ```
 
 这条命令会：
@@ -118,6 +121,6 @@ netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 1
 
 - 单用户
 - 单客户端挂载
-- 无认证
+- 传输加密只依赖共享口令，不做身份认证
 - 无文件锁
 - 无 symlink / hardlink / mmap
