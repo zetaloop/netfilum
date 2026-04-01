@@ -330,6 +330,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "filetime",
+ "libc",
  "serde",
  "windows",
  "winfsp",

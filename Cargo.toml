@@ -8,6 +8,7 @@ bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive"] }
 ctrlc = "3.5.1"
 filetime = "0.2.27"
+libc = "0.2.183"
 serde = { version = "1.0.228", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]

@@ -7,15 +7,22 @@ use crate::protocol::{
 };
 use crate::rpc::{read_message, write_message};
 use filetime::{FileTime, set_file_times};
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::mem::MaybeUninit;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+#[cfg(not(unix))]
 const DEFAULT_VOLUME_SIZE: u64 = 1 << 40;
 
 pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -129,11 +136,7 @@ impl RpcServer {
             Request::SetBasicInfo { path, update } => {
                 self.set_basic_info(&path, update).map(Response::Attr)
             }
-            Request::GetVolumeInfo => Ok(Response::VolumeInfo(VolumeInfoData {
-                total_size: DEFAULT_VOLUME_SIZE,
-                free_size: DEFAULT_VOLUME_SIZE / 2,
-                label: self.volume_label.clone(),
-            })),
+            Request::GetVolumeInfo => self.volume_info().map(Response::VolumeInfo),
         }
     }
 
@@ -309,6 +312,16 @@ impl RpcServer {
         Ok(())
     }
 
+    fn volume_info(&self) -> RpcResult<VolumeInfoData> {
+        let (total_size, free_size) =
+            filesystem_capacity(&self.root_real).map_err(RpcError::from)?;
+        Ok(VolumeInfoData {
+            total_size,
+            free_size,
+            label: self.volume_label.clone(),
+        })
+    }
+
     fn set_basic_info(&self, relative: &str, update: BasicInfoUpdate) -> RpcResult<FileAttr> {
         let path = self.resolve_existing(relative)?;
 
@@ -407,6 +420,33 @@ fn expand_root(raw: &str) -> PathBuf {
     } else {
         PathBuf::from(raw)
     }
+}
+
+#[cfg(unix)]
+fn filesystem_capacity(path: &Path) -> std::io::Result<(u64, u64)> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL byte")
+    })?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    let block_size = if stats.f_frsize > 0 {
+        stats.f_frsize
+    } else {
+        stats.f_bsize
+    };
+    let total_size = block_size.saturating_mul(stats.f_blocks);
+    let free_size = block_size.saturating_mul(stats.f_bavail);
+    Ok((total_size, free_size))
+}
+
+#[cfg(not(unix))]
+fn filesystem_capacity(_path: &Path) -> std::io::Result<(u64, u64)> {
+    Ok((DEFAULT_VOLUME_SIZE, DEFAULT_VOLUME_SIZE / 2))
 }
 
 fn system_time_to_wire(value: Option<SystemTime>) -> Option<FileTimeValue> {
