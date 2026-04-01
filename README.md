@@ -9,6 +9,23 @@
 
 `netfilum up` 仍然保留，但它只是同机 Windows + WSL 场景下的快捷入口。它会通过 `wsl.exe` 启动与 `netfilum.exe` 同目录的 `netfilumd`，然后再执行挂载。
 
+## 架构
+
+```mermaid
+flowchart LR
+    A["Windows 应用<br/>资源管理器 / 编辑器"] --> B["netfilum<br/>WinFsp 挂载客户端"]
+    B --> C["自定义 RPC<br/>TCP + bincode"]
+    C --> D["netfilumd<br/>Linux / WSL 服务端"]
+    D --> E["导出目录<br/>std::fs"]
+```
+
+核心分工可以简单理解成这样：
+
+- `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射，是这个项目自己实现的
+- WinFsp 负责把 Windows 用户态文件系统接到盘符上，让 `netfilum` 能作为一个可挂载盘工作
+- `serde` 和 `bincode` 负责消息编解码，`clap` 负责命令行解析，`filetime` 负责时间戳设置
+- 服务端真正落到磁盘上的文件操作，底层使用的是 Rust 标准库 `std::fs`
+
 ## 前提
 
 - Windows 侧已安装 WinFsp
