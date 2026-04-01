@@ -51,7 +51,7 @@ flowchart LR
 
 ## 运行前提
 
-- Windows 侧已安装 WinFsp
+- Windows 侧已安装 [WinFsp](https://github.com/winfsp/winfsp)
 - 客户端能连接到服务端的地址和端口
 - 客户端与服务端使用同一个 `--password`
 
@@ -124,3 +124,5 @@ netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 1
 - 传输加密只依赖共享口令，不进行身份认证
 - 无文件锁
 - 无 symlink / hardlink / mmap
+
+我们使用了：<br>WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
