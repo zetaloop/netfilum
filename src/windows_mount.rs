@@ -123,16 +123,17 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
 fn spawn_wsl_server(args: &UpArgs) -> Result<Child, Box<dyn std::error::Error + Send + Sync>> {
     const DEFAULT_WSL_ROOT: &str = "/home/$USER/netfilum-root";
 
-    let workspace = windows_path_to_wsl(env!("CARGO_MANIFEST_DIR"))
-        .map_err(|error| format!("failed to map workspace into WSL: {error}"))?;
+    let daemon = sibling_daemon_path()?;
+    let daemon_wsl = windows_path_to_wsl(daemon.to_string_lossy().as_ref())
+        .map_err(|error| format!("failed to map daemon path into WSL: {error}"))?;
     let root = if args.root == DEFAULT_WSL_ROOT {
         "\"$HOME/netfilum-root\"".to_string()
     } else {
         shell_quote(&args.root)
     };
     let command = format!(
-        "set -e; cd {}; cargo run --quiet --bin netfilumd -- --root {} --addr {} --volume-label {}",
-        shell_quote(&workspace),
+        "set -e; exec {} --root {} --addr {} --volume-label {}",
+        shell_quote(&daemon_wsl),
         root,
         shell_quote(&args.addr.to_string()),
         shell_quote(&args.volume_label)
@@ -151,6 +152,26 @@ fn spawn_wsl_server(args: &UpArgs) -> Result<Child, Box<dyn std::error::Error + 
             )
             .into()
         })
+}
+
+fn sibling_daemon_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let current_exe = std::env::current_exe()?;
+    let exe_dir = current_exe.parent().ok_or_else(|| {
+        format!(
+            "failed to determine executable directory for {}",
+            current_exe.display()
+        )
+    })?;
+    let daemon = exe_dir.join("netfilumd");
+    if daemon.is_file() {
+        Ok(daemon)
+    } else {
+        Err(format!(
+            "`netfilum up` requires a sibling Linux daemon binary at {}",
+            daemon.display()
+        )
+        .into())
+    }
 }
 
 fn wait_for_server(
