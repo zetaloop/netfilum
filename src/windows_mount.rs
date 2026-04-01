@@ -1,3 +1,4 @@
+use crate::path::windows_path_to_wsl;
 use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response,
 };
@@ -5,10 +6,11 @@ use crate::rpc::RpcClient;
 use crate::{MountArgs, UpArgs};
 use std::ffi::c_void;
 use std::io;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -31,6 +33,7 @@ use winfsp_sys::{FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES};
 const WINDOWS_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
 const WINDOWS_TICKS_PER_SECOND: u64 = 10_000_000;
 const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
+const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const FILE_DIRECTORY_FILE_FLAG: u32 = 0x0000_0001;
 
 pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -81,8 +84,94 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     Ok(())
 }
 
-pub fn run_up(_args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    Err("Windows orchestration has not been implemented yet".into())
+pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut child = spawn_wsl_server(&args)?;
+    let mount_args = MountArgs {
+        mount: args.mount.clone(),
+        addr: args.addr,
+        volume_label: args.volume_label.clone(),
+    };
+
+    let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        wait_for_server(args.addr, &mut child)?;
+        run_mount(mount_args)
+    })();
+
+    stop_wsl_server(&mut child);
+    result
+}
+
+fn spawn_wsl_server(args: &UpArgs) -> Result<Child, Box<dyn std::error::Error + Send + Sync>> {
+    const DEFAULT_WSL_ROOT: &str = "/home/$USER/netfilum-root";
+
+    let workspace = windows_path_to_wsl(env!("CARGO_MANIFEST_DIR"))
+        .map_err(|error| format!("failed to map workspace into WSL: {error}"))?;
+    let root = if args.root == DEFAULT_WSL_ROOT {
+        "\"$HOME/netfilum-root\"".to_string()
+    } else {
+        shell_quote(&args.root)
+    };
+    let command = format!(
+        "set -e; cd {}; cargo run --quiet -- server --root {} --addr {} --volume-label {}",
+        shell_quote(&workspace),
+        root,
+        shell_quote(&args.addr.to_string()),
+        shell_quote(&args.volume_label)
+    );
+
+    Command::new("wsl.exe")
+        .args(["-d", args.distro.as_str(), "sh", "-lc", command.as_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "failed to start WSL server in distro {}: {error}",
+                args.distro
+            )
+            .into()
+        })
+}
+
+fn wait_for_server(
+    addr: std::net::SocketAddr,
+    child: &mut Child,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = RpcClient::new(addr);
+    let deadline = Instant::now() + SERVER_READY_TIMEOUT;
+
+    loop {
+        let error = match client.send(&Request::GetVolumeInfo) {
+            Ok(Response::VolumeInfo(_)) => return Ok(()),
+            Ok(_) => return Err("unexpected response while waiting for RPC server".into()),
+            Err(error) => error,
+        };
+
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("WSL server exited before becoming ready: {status}").into());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!("timed out waiting for RPC server at {addr}: {error}").into());
+        }
+
+        thread::sleep(SHUTDOWN_POLL);
+    }
+}
+
+fn stop_wsl_server(child: &mut Child) {
+    match child.try_wait() {
+        Ok(Some(_)) | Err(_) => return,
+        Ok(None) => {}
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[derive(Debug)]
