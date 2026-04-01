@@ -47,7 +47,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     ));
     if args.password.is_empty() {
         print_warn(format_args!(
-            "netfilum: warning: empty password configured, transport is encrypted but not secret"
+            "netfilum: warning: empty password configured, using plaintext transport"
         ));
     } else {
         print_info(format_args!(

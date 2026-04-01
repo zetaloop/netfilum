@@ -14,14 +14,14 @@
 ```mermaid
 flowchart LR
     A["Windows 应用<br/>资源管理器 / 编辑器"] --> B["netfilum<br/>WinFsp 挂载客户端"]
-    B --> C["自定义 RPC<br/>密码认证 + 加密传输"]
+    B --> C["自定义 RPC<br/>可选密码认证 + 加密传输"]
     C --> D["netfilumd<br/>Linux / WSL 服务端"]
     D --> E["导出目录<br/>std::fs"]
 ```
 
 核心分工可以简单理解成这样：
 
-- `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射、密码认证、加密传输，是这个项目自己实现的
+- `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射，以及按密码启用的认证和加密传输，是这个项目自己实现的
 - WinFsp 负责把 Windows 用户态文件系统接到盘符上，让 `netfilum` 能作为一个可挂载盘工作
 - `serde` 和 `bincode` 负责消息编解码，`clap` 负责命令行解析，`filetime` 负责时间戳设置
 - 服务端真正落到磁盘上的文件操作，底层使用的是 Rust 标准库 `std::fs`
@@ -33,7 +33,7 @@ flowchart LR
 - 使用 `netfilum up` 时，`netfilum.exe` 和 `netfilumd` 需要位于同一目录，并且该目录能被 WSL 访问
 
 默认地址是 `127.0.0.1:4040`，默认卷标是 `netfilum`。
-默认密码是空字符串。此时仍会启用加密传输，但客户端和服务端都会输出警告。
+默认密码是空字符串。此时会使用明文传输，客户端和服务端都会输出警告。设置非空密码后会启用密码认证和加密传输。
 
 ## 从源码构建
 

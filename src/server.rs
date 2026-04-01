@@ -5,7 +5,7 @@ use crate::protocol::{
     RpcResult, VolumeInfoData,
 };
 use crate::rpc::{
-    AUTH_TOKEN, AuthRequest, ServerHello, derive_transport_key, random_bytes,
+    AUTH_TOKEN, AuthRequest, ServerHello, TransportMode, derive_transport_key, random_bytes,
     read_encrypted_message, write_encrypted_message, write_message,
 };
 use crate::{print_error, print_info, print_warn};
@@ -39,7 +39,7 @@ pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sy
     ));
     if args.password.is_empty() {
         print_warn(format_args!(
-            "netfilumd: warning: empty password configured, transport is encrypted but not secret"
+            "netfilumd: warning: empty password configured, using plaintext transport"
         ));
     } else {
         print_info(format_args!(
@@ -93,31 +93,53 @@ impl RpcServer {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let hello = ServerHello {
-            salt: random_bytes()?,
+            transport: if self.password.is_empty() {
+                TransportMode::Plaintext
+            } else {
+                TransportMode::Encrypted {
+                    salt: random_bytes()?,
+                }
+            },
         };
         write_message(&mut stream, &hello)?;
-        let key = derive_transport_key(&self.password, &hello.salt);
-        let auth_result = match read_encrypted_message::<AuthRequest>(&mut stream, &key) {
-            Ok(auth) => self.authenticate(&auth),
-            Err(_) => Err(RpcError::new(
-                crate::protocol::ErrorCode::PermissionDenied,
-                "invalid password",
-            )),
-        };
-        write_message(&mut stream, &auth_result)?;
-        auth_result.map_err(std::io::Error::from)?;
-
-        loop {
-            let request: Request = match read_encrypted_message(&mut stream, &key) {
-                Ok(request) => request,
-                Err(error) if is_client_disconnect(&error) => return Ok(()),
-                Err(error) => return Err(error),
+        if let TransportMode::Encrypted { salt } = hello.transport {
+            let key = derive_transport_key(&self.password, &salt);
+            let auth_result = match read_encrypted_message::<AuthRequest>(&mut stream, &key) {
+                Ok(auth) => self.authenticate(&auth),
+                Err(_) => Err(RpcError::new(
+                    crate::protocol::ErrorCode::PermissionDenied,
+                    "invalid password",
+                )),
             };
-            let response = self.dispatch(request);
-            match write_encrypted_message(&mut stream, &key, &response) {
-                Ok(()) => {}
-                Err(error) if is_client_disconnect(&error) => return Ok(()),
-                Err(error) => return Err(error),
+            write_message(&mut stream, &auth_result)?;
+            auth_result.map_err(std::io::Error::from)?;
+
+            loop {
+                let request: Request = match read_encrypted_message(&mut stream, &key) {
+                    Ok(request) => request,
+                    Err(error) if is_client_disconnect(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+                let response = self.dispatch(request);
+                match write_encrypted_message(&mut stream, &key, &response) {
+                    Ok(()) => {}
+                    Err(error) if is_client_disconnect(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            loop {
+                let request: Request = match crate::rpc::read_message(&mut stream) {
+                    Ok(request) => request,
+                    Err(error) if is_client_disconnect(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+                let response = self.dispatch(request);
+                match write_message(&mut stream, &response) {
+                    Ok(()) => {}
+                    Err(error) if is_client_disconnect(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
             }
         }
     }

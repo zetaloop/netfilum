@@ -32,8 +32,17 @@ pub struct RpcClient {
 #[cfg(windows)]
 #[derive(Debug)]
 struct RpcSession {
-    stream: TcpStream,
-    key: [u8; KEY_LEN],
+    transport: RpcTransport,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+enum RpcTransport {
+    Plaintext(TcpStream),
+    Encrypted {
+        stream: TcpStream,
+        key: [u8; KEY_LEN],
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +52,13 @@ pub(crate) struct AuthRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServerHello {
-    pub salt: [u8; SALT_LEN],
+    pub transport: TransportMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum TransportMode {
+    Plaintext,
+    Encrypted { salt: [u8; SALT_LEN] },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,17 +112,40 @@ impl RpcSession {
         stream.set_write_timeout(Some(timeout))?;
 
         let hello: ServerHello = read_message(&mut stream)?;
-        let key = derive_transport_key(password, &hello.salt);
-        write_encrypted_message(&mut stream, &key, &AuthRequest { token: AUTH_TOKEN })?;
-        let auth_result: RpcResult<()> = read_message(&mut stream)?;
-        auth_result.map_err(|error| error.to_io_error())?;
+        let transport = match hello.transport {
+            TransportMode::Plaintext => {
+                if password.is_empty() {
+                    RpcTransport::Plaintext(stream)
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "server is using plaintext transport but client was configured with a password",
+                    ));
+                }
+            }
+            TransportMode::Encrypted { salt } => {
+                let key = derive_transport_key(password, &salt);
+                write_encrypted_message(&mut stream, &key, &AuthRequest { token: AUTH_TOKEN })?;
+                let auth_result: RpcResult<()> = read_message(&mut stream)?;
+                auth_result.map_err(|error| error.to_io_error())?;
+                RpcTransport::Encrypted { stream, key }
+            }
+        };
 
-        Ok(Self { stream, key })
+        Ok(Self { transport })
     }
 
     fn send(&mut self, request: &Request) -> io::Result<RpcResult<Response>> {
-        write_encrypted_message(&mut self.stream, &self.key, request)?;
-        read_encrypted_message(&mut self.stream, &self.key)
+        match &mut self.transport {
+            RpcTransport::Plaintext(stream) => {
+                write_message(stream, request)?;
+                read_message(stream)
+            }
+            RpcTransport::Encrypted { stream, key } => {
+                write_encrypted_message(stream, key, request)?;
+                read_encrypted_message(stream, key)
+            }
+        }
     }
 }
 
