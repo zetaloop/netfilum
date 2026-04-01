@@ -1,10 +1,10 @@
 use crate::path::normalize_relative_path;
-use filetime::{set_file_times, FileTime};
+use filetime::{FileTime, set_file_times};
 use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
 };
-use netfilum::rpc::{read_message, write_message, CONNECTION_DATA, CONNECTION_MONITOR};
+use netfilum::rpc::{CONNECTION_DATA, CONNECTION_MONITOR, RpcCipher, read_message, write_message};
 use netfilum::{highlight, print_info, print_warn};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -21,6 +21,7 @@ pub fn run(
     root: String,
     addr: SocketAddr,
     volume_label: String,
+    password: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = expand_root(&root);
     print_info(
@@ -32,7 +33,7 @@ pub fn run(
             highlight(&volume_label)
         ),
     );
-    let server = RpcServer::new(root, volume_label)?;
+    let server = RpcServer::new(root, volume_label, &password)?;
     server.serve(addr)?;
     Ok(())
 }
@@ -42,16 +43,18 @@ struct RpcServer {
     root: PathBuf,
     root_real: PathBuf,
     volume_label: String,
+    cipher: RpcCipher,
 }
 
 impl RpcServer {
-    fn new(root: PathBuf, volume_label: String) -> std::io::Result<Self> {
+    fn new(root: PathBuf, volume_label: String, password: &str) -> std::io::Result<Self> {
         fs::create_dir_all(&root)?;
         let root_real = root.canonicalize()?;
         Ok(Self {
             root,
             root_real,
             volume_label,
+            cipher: RpcCipher::from_password(password)?,
         })
     }
 
@@ -85,9 +88,9 @@ impl RpcServer {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let request: Request = read_message(&mut stream)?;
+        let request: Request = read_message(&mut stream, &self.cipher)?;
         let response = self.dispatch(request);
-        write_message(&mut stream, &response)
+        write_message(&mut stream, &self.cipher, &response)
     }
 
     fn dispatch(&self, request: Request) -> RpcResult<Response> {

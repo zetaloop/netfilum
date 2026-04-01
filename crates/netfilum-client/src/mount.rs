@@ -1,10 +1,10 @@
 use crate::path::windows_path_to_wsl;
 use crate::rpc_client::{MonitorConnection, RpcClient};
 use crate::{MountArgs, UpArgs};
-use netfilum::{highlight, print_info, print_warn};
 use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response,
 };
+use netfilum::{highlight, print_info, print_warn};
 use std::ffi::c_void;
 use std::io;
 use std::process::{Child, Command, Stdio};
@@ -43,7 +43,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         format_args!("connecting to {}", highlight(args.addr)),
     );
     let _fsp = winfsp_init()?;
-    let client = RpcClient::new(args.addr);
+    let client = RpcClient::new(args.addr, &args.password)?;
     let descriptor = Arc::new(build_security_descriptor()?);
 
     let volume_label = match client.send(&Request::GetVolumeInfo) {
@@ -125,6 +125,7 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
         mount: args.mount.clone(),
         addr: args.addr,
         volume_label: args.volume_label.clone(),
+        password: args.password.clone(),
     };
 
     let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -132,7 +133,7 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
             "up",
             format_args!("waiting for server at {}", highlight(args.addr)),
         );
-        wait_for_server(args.addr, &mut child)?;
+        wait_for_server(args.addr, &args.password, &mut child)?;
         print_info("up", format_args!("server ready"));
         run_mount(mount_args)
     })();
@@ -154,11 +155,12 @@ fn spawn_wsl_server(args: &UpArgs) -> Result<Child, Box<dyn std::error::Error + 
         shell_quote(&args.root)
     };
     let command = format!(
-        "set -e; exec {} --root {} --addr {} --volume-label {}",
+        "set -e; exec {} --root {} --addr {} --volume-label {} --password {}",
         shell_quote(&daemon_wsl),
         root,
         shell_quote(&args.addr.to_string()),
-        shell_quote(&args.volume_label)
+        shell_quote(&args.volume_label),
+        shell_quote(&args.password)
     );
 
     Command::new("wsl.exe")
@@ -198,9 +200,10 @@ fn sibling_daemon_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error
 
 fn wait_for_server(
     addr: std::net::SocketAddr,
+    password: &str,
     child: &mut Child,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = RpcClient::new(addr);
+    let client = RpcClient::new(addr, password)?;
     let deadline = Instant::now() + SERVER_READY_TIMEOUT;
 
     loop {
@@ -702,18 +705,15 @@ fn spawn_connection_monitor(
         match monitor.wait_for_disconnect() {
             Ok(()) => {
                 if !mount_state.stop.load(Ordering::SeqCst) {
-                    mount_state.report_disconnect(format!(
-                        "lost connection to server at {addr}"
-                    ));
+                    mount_state.report_disconnect(format!("lost connection to server at {addr}"));
                 }
             }
             Err(error) if mount_state.stop.load(Ordering::SeqCst) => {
                 let _ = error;
             }
             Err(error) => {
-                mount_state.report_disconnect(format!(
-                    "monitor connection failed at {addr}: {error}"
-                ));
+                mount_state
+                    .report_disconnect(format!("monitor connection failed at {addr}: {error}"));
             }
         }
     });

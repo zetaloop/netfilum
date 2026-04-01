@@ -21,6 +21,8 @@ struct ServerArgs {
     addr: SocketAddr,
     #[arg(long, default_value = DEFAULT_VOLUME_LABEL)]
     volume_label: String,
+    #[arg(long, default_value = "")]
+    password: String,
 }
 
 fn main() {
@@ -32,5 +34,15 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = ServerArgs::parse();
-    server::run(args.root, args.addr, args.volume_label)
+    warn_if_empty_password(&args.password);
+    server::run(args.root, args.addr, args.volume_label, args.password)
+}
+
+fn warn_if_empty_password(password: &str) {
+    if password.is_empty() {
+        netfilum::print_warn(
+            "server",
+            format_args!("using an empty password; transport encryption is easy to guess"),
+        );
+    }
 }

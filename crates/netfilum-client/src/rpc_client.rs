@@ -1,5 +1,5 @@
 use netfilum::protocol::{Request, Response, RpcResult};
-use netfilum::rpc::{read_message, write_message, CONNECTION_DATA, CONNECTION_MONITOR};
+use netfilum::rpc::{CONNECTION_DATA, CONNECTION_MONITOR, RpcCipher, read_message, write_message};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
@@ -8,14 +8,16 @@ use std::time::Duration;
 pub struct RpcClient {
     addr: SocketAddr,
     timeout: Duration,
+    cipher: RpcCipher,
 }
 
 impl RpcClient {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self {
+    pub fn new(addr: SocketAddr, password: &str) -> io::Result<Self> {
+        Ok(Self {
             addr,
             timeout: Duration::from_secs(5),
-        }
+            cipher: RpcCipher::from_password(password)?,
+        })
     }
 
     pub fn send(&self, request: &Request) -> io::Result<Response> {
@@ -25,8 +27,8 @@ impl RpcClient {
         stream.set_write_timeout(Some(self.timeout))?;
 
         stream.write_all(&[CONNECTION_DATA])?;
-        write_message(&mut stream, request)?;
-        let response: RpcResult<Response> = read_message(&mut stream)?;
+        write_message(&mut stream, &self.cipher, request)?;
+        let response: RpcResult<Response> = read_message(&mut stream, &self.cipher)?;
         response.map_err(|error| error.to_io_error())
     }
 }

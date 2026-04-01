@@ -40,6 +40,8 @@ pub struct UpArgs {
     pub addr: SocketAddr,
     #[arg(long, default_value = DEFAULT_VOLUME_LABEL)]
     pub volume_label: String,
+    #[arg(long, default_value = "")]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -50,6 +52,8 @@ pub struct MountArgs {
     pub addr: SocketAddr,
     #[arg(long, default_value = DEFAULT_VOLUME_LABEL)]
     pub volume_label: String,
+    #[arg(long, default_value = "")]
+    pub password: String,
 }
 
 fn main() {
@@ -61,7 +65,22 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match Cli::parse().command {
-        Command::Up(args) => mount::run_up(args),
-        Command::Mount(args) => mount::run_mount(args),
+        Command::Up(args) => {
+            warn_if_empty_password("up", &args.password);
+            mount::run_up(args)
+        }
+        Command::Mount(args) => {
+            warn_if_empty_password("mount", &args.password);
+            mount::run_mount(args)
+        }
+    }
+}
+
+fn warn_if_empty_password(label: &str, password: &str) {
+    if password.is_empty() {
+        netfilum::print_warn(
+            label,
+            format_args!("using an empty password; transport encryption is easy to guess"),
+        );
     }
 }
