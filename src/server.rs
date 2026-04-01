@@ -5,7 +5,7 @@ use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
 };
-use crate::rpc::{read_message, write_message};
+use crate::rpc::{AuthRequest, read_message, write_message};
 use filetime::{FileTime, set_file_times};
 #[cfg(unix)]
 use std::ffi::CString;
@@ -33,7 +33,7 @@ pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sy
         args.addr,
         args.volume_label
     ));
-    let server = RpcServer::new(root, args.volume_label)?;
+    let server = RpcServer::new(root, args.volume_label, args.password)?;
     server.serve(args.addr)?;
     Ok(())
 }
@@ -43,16 +43,18 @@ struct RpcServer {
     root: PathBuf,
     root_real: PathBuf,
     volume_label: String,
+    password: String,
 }
 
 impl RpcServer {
-    fn new(root: PathBuf, volume_label: String) -> std::io::Result<Self> {
+    fn new(root: PathBuf, volume_label: String, password: String) -> std::io::Result<Self> {
         fs::create_dir_all(&root)?;
         let root_real = root.canonicalize()?;
         Ok(Self {
             root,
             root_real,
             volume_label,
+            password,
         })
     }
 
@@ -72,6 +74,10 @@ impl RpcServer {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let auth: AuthRequest = read_message(&mut stream)?;
+        let auth_result = self.authenticate(&auth.password);
+        write_message(&mut stream, &auth_result)?;
+        auth_result.map_err(std::io::Error::from)?;
         let request: Request = read_message(&mut stream)?;
         let response = self.dispatch(request);
         write_message(&mut stream, &response)
@@ -137,6 +143,17 @@ impl RpcServer {
                 self.set_basic_info(&path, update).map(Response::Attr)
             }
             Request::GetVolumeInfo => self.volume_info().map(Response::VolumeInfo),
+        }
+    }
+
+    fn authenticate(&self, password: &str) -> RpcResult<()> {
+        if password == self.password {
+            Ok(())
+        } else {
+            Err(RpcError::new(
+                crate::protocol::ErrorCode::PermissionDenied,
+                "invalid password",
+            ))
         }
     }
 

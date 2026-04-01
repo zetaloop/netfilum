@@ -1,6 +1,7 @@
 use crate::protocol::RpcError;
 #[cfg(windows)]
 use crate::protocol::{Request, Response, RpcResult};
+use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 #[cfg(windows)]
 use std::net::{SocketAddr, TcpStream};
@@ -12,14 +13,21 @@ use std::time::Duration;
 pub struct RpcClient {
     addr: SocketAddr,
     timeout: Duration,
+    password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AuthRequest {
+    pub password: String,
 }
 
 #[cfg(windows)]
 impl RpcClient {
-    pub fn new(addr: SocketAddr) -> Self {
+    pub fn new(addr: SocketAddr, password: String) -> Self {
         Self {
             addr,
             timeout: Duration::from_secs(5),
+            password,
         }
     }
 
@@ -28,6 +36,15 @@ impl RpcClient {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(self.timeout))?;
         stream.set_write_timeout(Some(self.timeout))?;
+
+        write_message(
+            &mut stream,
+            &AuthRequest {
+                password: self.password.clone(),
+            },
+        )?;
+        let auth_result: RpcResult<()> = read_message(&mut stream)?;
+        auth_result.map_err(|error| error.to_io_error())?;
 
         write_message(&mut stream, request)?;
         let response: RpcResult<Response> = read_message(&mut stream)?;

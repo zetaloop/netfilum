@@ -19,6 +19,7 @@ const DEFAULT_MOUNT: &str = "N:";
 const DEFAULT_VOLUME_LABEL: &str = "netfilum";
 const DEFAULT_WSL_DISTRO: &str = "Ubuntu";
 const DEFAULT_WSL_ROOT: &str = "/home/$USER/netfilum-root";
+const DEFAULT_PASSWORD: &str = "";
 
 #[derive(Debug, Parser)]
 #[command(name = "netfilum")]
@@ -46,6 +47,8 @@ pub struct UpArgs {
     pub addr: SocketAddr,
     #[arg(long, default_value = DEFAULT_VOLUME_LABEL)]
     pub volume_label: String,
+    #[arg(long, default_value = DEFAULT_PASSWORD)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -58,6 +61,8 @@ pub struct ServerArgs {
     pub addr: SocketAddr,
     #[arg(long, default_value = DEFAULT_VOLUME_LABEL)]
     pub volume_label: String,
+    #[arg(long, default_value = DEFAULT_PASSWORD)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -68,6 +73,8 @@ pub struct MountArgs {
     pub addr: SocketAddr,
     #[arg(long, default_value = DEFAULT_VOLUME_LABEL)]
     pub volume_label: String,
+    #[arg(long, default_value = DEFAULT_PASSWORD)]
+    pub password: String,
 }
 
 pub fn run_client() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

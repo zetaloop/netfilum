@@ -46,7 +46,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         args.addr, args.mount
     ));
     let _fsp = winfsp_init()?;
-    let client = RpcClient::new(args.addr);
+    let client = RpcClient::new(args.addr, args.password.clone());
     let descriptor = Arc::new(build_security_descriptor()?);
     let mount_state = Arc::new(MountState::default());
 
@@ -117,6 +117,7 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
         mount: args.mount.clone(),
         addr: args.addr,
         volume_label: args.volume_label.clone(),
+        password: args.password.clone(),
     };
 
     let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -124,7 +125,7 @@ pub fn run_up(args: UpArgs) -> Result<(), Box<dyn std::error::Error + Send + Syn
             "netfilum: waiting for RPC server at {}",
             args.addr
         ));
-        wait_for_server(args.addr, &mut child)?;
+        wait_for_server(args.addr, &args.password, &mut child)?;
         print_status(format_args!("netfilum: RPC server is ready"));
         run_mount(mount_args)
     })();
@@ -152,6 +153,11 @@ fn spawn_wsl_server(args: &UpArgs) -> Result<Child, Box<dyn std::error::Error + 
         shell_quote(&args.addr.to_string()),
         shell_quote(&args.volume_label)
     );
+    let command = if args.password.is_empty() {
+        command
+    } else {
+        format!("{command} --password {}", shell_quote(&args.password))
+    };
 
     Command::new("wsl.exe")
         .args(["-d", args.distro.as_str(), "sh", "-lc", command.as_str()])
@@ -190,9 +196,10 @@ fn sibling_daemon_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error
 
 fn wait_for_server(
     addr: std::net::SocketAddr,
+    password: &str,
     child: &mut Child,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = RpcClient::new(addr);
+    let client = RpcClient::new(addr, password.to_string());
     let deadline = Instant::now() + SERVER_READY_TIMEOUT;
 
     loop {
