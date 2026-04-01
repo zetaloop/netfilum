@@ -3,15 +3,15 @@ use crate::protocol::RpcError;
 use crate::protocol::{Request, Response, RpcResult};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
-use pbkdf2::pbkdf2_hmac_array;
+use ring::pbkdf2;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 #[cfg(windows)]
 use socket2::SockRef;
 use std::io::{self, Read, Write};
 #[cfg(not(windows))]
 use std::net::TcpStream;
+use std::num::NonZeroU32;
 #[cfg(windows)]
 use std::net::{Shutdown, SocketAddr, TcpStream};
 #[cfg(windows)]
@@ -233,7 +233,15 @@ fn connect_transport(
 }
 
 pub(crate) fn derive_transport_key(password: &str, salt: &[u8; SALT_LEN]) -> [u8; KEY_LEN] {
-    pbkdf2_hmac_array::<Sha256, KEY_LEN>(password.as_bytes(), salt, PBKDF2_ROUNDS)
+    let mut key = [0u8; KEY_LEN];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(PBKDF2_ROUNDS).expect("PBKDF2 rounds must be non-zero"),
+        salt,
+        password.as_bytes(),
+        &mut key,
+    );
+    key
 }
 
 pub(crate) fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
