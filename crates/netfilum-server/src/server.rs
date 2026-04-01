@@ -6,14 +6,15 @@ use netfilum::protocol::{
 };
 use netfilum::rpc::{read_message, write_message};
 use netfilum::{highlight, print_info};
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::mem::MaybeUninit;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const DEFAULT_VOLUME_SIZE: u64 = 1 << 40;
 
 pub fn run(
     root: String,
@@ -133,11 +134,15 @@ impl RpcServer {
             Request::SetBasicInfo { path, update } => {
                 self.set_basic_info(&path, update).map(Response::Attr)
             }
-            Request::GetVolumeInfo => Ok(Response::VolumeInfo(VolumeInfoData {
-                total_size: DEFAULT_VOLUME_SIZE,
-                free_size: DEFAULT_VOLUME_SIZE / 2,
-                label: self.volume_label.clone(),
-            })),
+            Request::GetVolumeInfo => {
+                let (total_size, free_size) =
+                    filesystem_capacity(&self.root_real).map_err(RpcError::from)?;
+                Ok(Response::VolumeInfo(VolumeInfoData {
+                    total_size,
+                    free_size,
+                    label: self.volume_label.clone(),
+                }))
+            }
         }
     }
 
@@ -458,4 +463,23 @@ fn set_readonly(path: &Path, readonly: bool) -> std::io::Result<()> {
     }
     permissions.set_mode(mode);
     fs::set_permissions(path, permissions)
+}
+
+fn filesystem_capacity(path: &Path) -> std::io::Result<(u64, u64)> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    let block_size = if stats.f_frsize > 0 {
+        stats.f_frsize
+    } else {
+        stats.f_bsize
+    };
+    let total_size = block_size.saturating_mul(stats.f_blocks);
+    let free_size = block_size.saturating_mul(stats.f_bavail);
+    Ok((total_size, free_size))
 }
