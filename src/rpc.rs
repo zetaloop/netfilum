@@ -1,12 +1,22 @@
 use crate::protocol::RpcError;
 #[cfg(windows)]
 use crate::protocol::{Request, Response, RpcResult};
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+use pbkdf2::pbkdf2_hmac_array;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::io::{self, Read, Write};
 #[cfg(windows)]
 use std::net::{SocketAddr, TcpStream};
 #[cfg(windows)]
 use std::time::Duration;
+
+pub(crate) const AUTH_TOKEN: [u8; 16] = *b"netfilum-auth-v1";
+const KEY_LEN: usize = 32;
+const NONCE_LEN: usize = 12;
+const SALT_LEN: usize = 16;
+const PBKDF2_ROUNDS: u32 = 100_000;
 
 #[cfg(windows)]
 #[derive(Debug, Clone)]
@@ -18,7 +28,18 @@ pub struct RpcClient {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AuthRequest {
-    pub password: String,
+    pub token: [u8; 16],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ServerHello {
+    pub salt: [u8; SALT_LEN],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedMessage {
+    nonce: [u8; NONCE_LEN],
+    ciphertext: Vec<u8>,
 }
 
 #[cfg(windows)]
@@ -37,19 +58,57 @@ impl RpcClient {
         stream.set_read_timeout(Some(self.timeout))?;
         stream.set_write_timeout(Some(self.timeout))?;
 
-        write_message(
-            &mut stream,
-            &AuthRequest {
-                password: self.password.clone(),
-            },
-        )?;
+        let hello: ServerHello = read_message(&mut stream)?;
+        let key = derive_transport_key(&self.password, &hello.salt);
+        write_encrypted_message(&mut stream, &key, &AuthRequest { token: AUTH_TOKEN })?;
         let auth_result: RpcResult<()> = read_message(&mut stream)?;
         auth_result.map_err(|error| error.to_io_error())?;
 
-        write_message(&mut stream, request)?;
-        let response: RpcResult<Response> = read_message(&mut stream)?;
+        write_encrypted_message(&mut stream, &key, request)?;
+        let response: RpcResult<Response> = read_encrypted_message(&mut stream, &key)?;
         response.map_err(|error| error.to_io_error())
     }
+}
+
+pub(crate) fn derive_transport_key(password: &str, salt: &[u8; SALT_LEN]) -> [u8; KEY_LEN] {
+    pbkdf2_hmac_array::<Sha256, KEY_LEN>(password.as_bytes(), salt, PBKDF2_ROUNDS)
+}
+
+pub(crate) fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
+    Ok(bytes)
+}
+
+pub(crate) fn write_encrypted_message<T: serde::Serialize>(
+    writer: &mut impl Write,
+    key: &[u8; KEY_LEN],
+    value: &T,
+) -> io::Result<()> {
+    let plaintext =
+        bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(encode_err)?;
+    let nonce = random_bytes::<NONCE_LEN>()?;
+    let cipher = ChaCha20Poly1305::new_from_slice(key)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    write_message(writer, &EncryptedMessage { nonce, ciphertext })
+}
+
+pub(crate) fn read_encrypted_message<T: serde::de::DeserializeOwned>(
+    reader: &mut impl Read,
+    key: &[u8; KEY_LEN],
+) -> io::Result<T> {
+    let packet: EncryptedMessage = read_message(reader)?;
+    let cipher = ChaCha20Poly1305::new_from_slice(key)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&packet.nonce), packet.ciphertext.as_ref())
+        .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))?;
+    let (value, _) = bincode::serde::decode_from_slice(&plaintext, bincode::config::standard())
+        .map_err(decode_err)?;
+    Ok(value)
 }
 
 pub fn write_message<T: serde::Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()> {

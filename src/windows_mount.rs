@@ -45,6 +45,11 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         "netfilum: connecting to {} and preparing mount {}",
         args.addr, args.mount
     ));
+    if args.password.is_empty() {
+        print_status(format_args!(
+            "netfilum: warning: empty password configured, transport is encrypted but not secret"
+        ));
+    }
     let _fsp = winfsp_init()?;
     let client = RpcClient::new(args.addr, args.password.clone());
     let descriptor = Arc::new(build_security_descriptor()?);

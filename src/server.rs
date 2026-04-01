@@ -5,7 +5,10 @@ use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
 };
-use crate::rpc::{AuthRequest, read_message, write_message};
+use crate::rpc::{
+    AUTH_TOKEN, AuthRequest, ServerHello, derive_transport_key, random_bytes,
+    read_encrypted_message, write_encrypted_message, write_message,
+};
 use filetime::{FileTime, set_file_times};
 #[cfg(unix)]
 use std::ffi::CString;
@@ -33,6 +36,11 @@ pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sy
         args.addr,
         args.volume_label
     ));
+    if args.password.is_empty() {
+        print_status(format_args!(
+            "netfilumd: warning: empty password configured, transport is encrypted but not secret"
+        ));
+    }
     let server = RpcServer::new(root, args.volume_label, args.password)?;
     server.serve(args.addr)?;
     Ok(())
@@ -74,13 +82,23 @@ impl RpcServer {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let auth: AuthRequest = read_message(&mut stream)?;
-        let auth_result = self.authenticate(&auth.password);
+        let hello = ServerHello {
+            salt: random_bytes()?,
+        };
+        write_message(&mut stream, &hello)?;
+        let key = derive_transport_key(&self.password, &hello.salt);
+        let auth_result = match read_encrypted_message::<AuthRequest>(&mut stream, &key) {
+            Ok(auth) => self.authenticate(&auth),
+            Err(_) => Err(RpcError::new(
+                crate::protocol::ErrorCode::PermissionDenied,
+                "invalid password",
+            )),
+        };
         write_message(&mut stream, &auth_result)?;
         auth_result.map_err(std::io::Error::from)?;
-        let request: Request = read_message(&mut stream)?;
+        let request: Request = read_encrypted_message(&mut stream, &key)?;
         let response = self.dispatch(request);
-        write_message(&mut stream, &response)
+        write_encrypted_message(&mut stream, &key, &response)
     }
 
     fn dispatch(&self, request: Request) -> RpcResult<Response> {
@@ -146,8 +164,8 @@ impl RpcServer {
         }
     }
 
-    fn authenticate(&self, password: &str) -> RpcResult<()> {
-        if password == self.password {
+    fn authenticate(&self, request: &AuthRequest) -> RpcResult<()> {
+        if request.token == AUTH_TOKEN {
             Ok(())
         } else {
             Err(RpcError::new(
