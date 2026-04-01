@@ -1,0 +1,13 @@
+[package]
+name = "netfilum-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "netfilumd"
+path = "src/main.rs"
+
+[dependencies]
+netfilum = { path = "../.." }
+clap = { version = "4.6.0", features = ["derive"] }
+filetime = "0.2.27"

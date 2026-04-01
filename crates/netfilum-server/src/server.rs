@@ -1,33 +1,34 @@
-use crate::ServerArgs;
 use crate::path::normalize_relative_path;
-use crate::print_status;
-use crate::protocol::{
+use filetime::{set_file_times, FileTime};
+use netfilum::print_status;
+use netfilum::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response, RpcError,
     RpcResult, VolumeInfoData,
 };
-use crate::rpc::{read_message, write_message};
-use filetime::{FileTime, set_file_times};
+use netfilum::rpc::{read_message, write_message};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
 const DEFAULT_VOLUME_SIZE: u64 = 1 << 40;
 
-pub fn run(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let root = expand_root(&args.root);
+pub fn run(
+    root: String,
+    addr: SocketAddr,
+    volume_label: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let root = expand_root(&root);
     print_status(format_args!(
         "netfilumd: exporting {} on {} with label {}",
         root.display(),
-        args.addr,
-        args.volume_label
+        addr,
+        volume_label
     ));
-    let server = RpcServer::new(root, args.volume_label)?;
-    server.serve(args.addr)?;
+    let server = RpcServer::new(root, volume_label)?;
+    server.serve(addr)?;
     Ok(())
 }
 
@@ -168,7 +169,7 @@ impl RpcServer {
         let metadata = fs::metadata(&path).map_err(RpcError::from)?;
         if !metadata.is_dir() {
             return Err(RpcError::new(
-                crate::protocol::ErrorCode::NotDirectory,
+                netfilum::protocol::ErrorCode::NotDirectory,
                 "path is not a directory",
             ));
         }
@@ -229,7 +230,7 @@ impl RpcServer {
                 let metadata = fs::metadata(&path).map_err(RpcError::from)?;
                 if metadata.is_dir() {
                     return Err(RpcError::new(
-                        crate::protocol::ErrorCode::IsDirectory,
+                        netfilum::protocol::ErrorCode::IsDirectory,
                         "expected a file",
                     ));
                 }
@@ -238,14 +239,14 @@ impl RpcServer {
                 let metadata = fs::metadata(&path).map_err(RpcError::from)?;
                 if !metadata.is_dir() {
                     return Err(RpcError::new(
-                        crate::protocol::ErrorCode::NotDirectory,
+                        netfilum::protocol::ErrorCode::NotDirectory,
                         "expected a directory",
                     ));
                 }
                 let mut children = fs::read_dir(&path).map_err(RpcError::from)?;
                 if children.next().is_some() {
                     return Err(RpcError::new(
-                        crate::protocol::ErrorCode::DirectoryNotEmpty,
+                        netfilum::protocol::ErrorCode::DirectoryNotEmpty,
                         "directory is not empty",
                     ));
                 }
@@ -269,7 +270,7 @@ impl RpcServer {
         let to_path = self.resolve_for_new_path(to)?;
         if !replace_if_exists && to_path.exists() {
             return Err(RpcError::new(
-                crate::protocol::ErrorCode::AlreadyExists,
+                netfilum::protocol::ErrorCode::AlreadyExists,
                 "target already exists",
             ));
         }
@@ -343,33 +344,36 @@ impl RpcServer {
                 EntryKind::File
             },
             size: metadata.len(),
-            allocated_size: allocation_size(&metadata),
+            allocated_size: metadata.blocks() * 512,
             created: system_time_to_wire(metadata.created().ok()),
             accessed: system_time_to_wire(metadata.accessed().ok()),
             modified: system_time_to_wire(metadata.modified().ok()),
-            changed: changed_time(&metadata),
-            readonly: is_readonly(&metadata),
-            mode: mode_bits(&metadata),
+            changed: Some(FileTimeValue {
+                secs: metadata.ctime(),
+                nanos: metadata.ctime_nsec() as u32,
+            }),
+            readonly: metadata.permissions().mode() & 0o222 == 0,
+            mode: Some(metadata.permissions().mode()),
         })
     }
 
     fn resolve_existing(&self, relative: &str) -> RpcResult<PathBuf> {
-        let joined =
-            self.root
-                .join(normalize_relative_path(relative).map_err(|message| {
-                    RpcError::new(crate::protocol::ErrorCode::InvalidInput, message)
-                })?);
+        let joined = self
+            .root
+            .join(normalize_relative_path(relative).map_err(|message| {
+                RpcError::new(netfilum::protocol::ErrorCode::InvalidInput, message)
+            })?);
         let resolved = joined.canonicalize().map_err(RpcError::from)?;
         self.ensure_within_root(&resolved)?;
         Ok(joined)
     }
 
     fn resolve_for_new_path(&self, relative: &str) -> RpcResult<PathBuf> {
-        let joined =
-            self.root
-                .join(normalize_relative_path(relative).map_err(|message| {
-                    RpcError::new(crate::protocol::ErrorCode::InvalidInput, message)
-                })?);
+        let joined = self
+            .root
+            .join(normalize_relative_path(relative).map_err(|message| {
+                RpcError::new(netfilum::protocol::ErrorCode::InvalidInput, message)
+            })?);
         let parent = joined.parent().unwrap_or(&self.root);
         let resolved_parent = parent.canonicalize().map_err(RpcError::from)?;
         self.ensure_within_root(&resolved_parent)?;
@@ -381,7 +385,7 @@ impl RpcServer {
             Ok(())
         } else {
             Err(RpcError::new(
-                crate::protocol::ErrorCode::PermissionDenied,
+                netfilum::protocol::ErrorCode::PermissionDenied,
                 "path escapes the exported root",
             ))
         }
@@ -441,50 +445,6 @@ fn current_modified_time(path: &Path) -> RpcResult<FileTime> {
         .unwrap_or_else(|| FileTime::from_system_time(SystemTime::now())))
 }
 
-#[cfg(unix)]
-fn allocation_size(metadata: &fs::Metadata) -> u64 {
-    metadata.blocks() * 512
-}
-
-#[cfg(not(unix))]
-fn allocation_size(metadata: &fs::Metadata) -> u64 {
-    metadata.len()
-}
-
-#[cfg(unix)]
-fn changed_time(metadata: &fs::Metadata) -> Option<FileTimeValue> {
-    Some(FileTimeValue {
-        secs: metadata.ctime(),
-        nanos: metadata.ctime_nsec() as u32,
-    })
-}
-
-#[cfg(not(unix))]
-fn changed_time(_metadata: &fs::Metadata) -> Option<FileTimeValue> {
-    None
-}
-
-#[cfg(unix)]
-fn mode_bits(metadata: &fs::Metadata) -> Option<u32> {
-    Some(metadata.permissions().mode())
-}
-
-#[cfg(not(unix))]
-fn mode_bits(_metadata: &fs::Metadata) -> Option<u32> {
-    None
-}
-
-#[cfg(unix)]
-fn is_readonly(metadata: &fs::Metadata) -> bool {
-    metadata.permissions().mode() & 0o222 == 0
-}
-
-#[cfg(not(unix))]
-fn is_readonly(metadata: &fs::Metadata) -> bool {
-    metadata.permissions().readonly()
-}
-
-#[cfg(unix)]
 fn set_readonly(path: &Path, readonly: bool) -> std::io::Result<()> {
     let mut permissions = fs::metadata(path)?.permissions();
     let mut mode = permissions.mode();
@@ -494,12 +454,5 @@ fn set_readonly(path: &Path, readonly: bool) -> std::io::Result<()> {
         mode |= 0o200;
     }
     permissions.set_mode(mode);
-    fs::set_permissions(path, permissions)
-}
-
-#[cfg(not(unix))]
-fn set_readonly(path: &Path, readonly: bool) -> std::io::Result<()> {
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_readonly(readonly);
     fs::set_permissions(path, permissions)
 }

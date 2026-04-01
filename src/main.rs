@@ -1,6 +1,0 @@
-fn main() {
-    if let Err(error) = netfilum::run_client() {
-        eprintln!("{error}");
-        std::process::exit(1);
-    }
-}

@@ -43,16 +43,16 @@ flowchart LR
 Windows 客户端：
 
 ```bash
-cargo build --release --bin netfilum
+cargo build --release -p netfilum-client
 ```
 
 Linux / WSL 服务端：
 
 ```bash
-cargo build --release --bin netfilumd
+cargo build --release -p netfilum-server
 ```
 
-从源码调试时也可以直接使用 `cargo run`。
+构建产物统一输出到 `target/release/` 目录。从源码调试时也可以直接使用 `cargo run -p netfilum-client` 或 `cargo run -p netfilum-server`。
 
 ## 使用
 

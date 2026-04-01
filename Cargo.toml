@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/netfilum-client", "crates/netfilum-server"]
+default-members = ["."]
+
 [package]
 name = "netfilum"
 version = "0.1.0"
@@ -5,23 +9,7 @@ edition = "2024"
 
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
-clap = { version = "4.6.0", features = ["derive"] }
-ctrlc = "3.5.1"
-filetime = "0.2.27"
 serde = { version = "1.0.228", features = ["derive"] }
-
-[target.'cfg(windows)'.dependencies]
-winfsp = { version = "0.12.4", features = ["system", "windows-61"] }
-winfsp-sys = { version = "0.12.1", features = ["system"] }
-windows = { version = "0.61.3", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Storage_FileSystem",
-] }
-
-[target.'cfg(windows)'.build-dependencies]
-winfsp = { version = "0.12.4", features = ["system"] }
 
 [patch.crates-io]
 winfsp-sys = { path = "vendor/winfsp-sys" }

@@ -1,0 +1,24 @@
+[package]
+name = "netfilum-client"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "netfilum"
+path = "src/main.rs"
+
+[dependencies]
+netfilum = { path = "../.." }
+clap = { version = "4.6.0", features = ["derive"] }
+ctrlc = "3.5.1"
+winfsp = { version = "0.12.4", features = ["system", "windows-61"] }
+winfsp-sys = { version = "0.12.1", features = ["system"] }
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
+
+[build-dependencies]
+winfsp = { version = "0.12.4", features = ["system"] }

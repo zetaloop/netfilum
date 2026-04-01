@@ -327,13 +327,28 @@ name = "netfilum"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "serde",
+]
+
+[[package]]
+name = "netfilum-client"
+version = "0.1.0"
+dependencies = [
  "clap",
  "ctrlc",
- "filetime",
- "serde",
+ "netfilum",
  "windows",
  "winfsp",
  "winfsp-sys",
+]
+
+[[package]]
+name = "netfilum-server"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "filetime",
+ "netfilum",
 ]
 
 [[package]]
