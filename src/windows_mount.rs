@@ -8,10 +8,13 @@ use std::ffi::c_void;
 use std::io;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::thread;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, HLOCAL, LocalFree, STATUS_CONNECTION_DISCONNECTED,
+    STATUS_HOST_UNREACHABLE, STATUS_IO_TIMEOUT, STATUS_NETWORK_UNREACHABLE,
+};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -33,6 +36,7 @@ use winfsp_sys::{FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES};
 const WINDOWS_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
 const WINDOWS_TICKS_PER_SECOND: u64 = 10_000_000;
 const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
+const CONNECTION_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const FILE_DIRECTORY_FILE_FLAG: u32 = 0x0000_0001;
 
@@ -44,6 +48,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     let _fsp = winfsp_init()?;
     let client = RpcClient::new(args.addr);
     let descriptor = Arc::new(build_security_descriptor()?);
+    let mount_state = Arc::new(MountState::default());
 
     let volume_label = match client.send(&Request::GetVolumeInfo) {
         Ok(Response::VolumeInfo(info)) if args.volume_label.is_empty() => info.label,
@@ -58,7 +63,10 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         client,
         security_descriptor: descriptor,
         volume_label: volume_label.clone(),
+        mount_state: Arc::clone(&mount_state),
     };
+    let watcher =
+        spawn_connection_monitor(args.addr, context.client.clone(), Arc::clone(&mount_state));
 
     let mut params = VolumeParams::new();
     params
@@ -86,10 +94,16 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         volume_label, args.mount
     ));
 
-    wait_for_shutdown()?;
+    let shutdown_reason = wait_for_shutdown(Arc::clone(&mount_state))?;
+    if let ShutdownReason::ServerDisconnected(message) = shutdown_reason {
+        print_status(format_args!("{message}"));
+    }
+
+    mount_state.stop.store(true, Ordering::SeqCst);
     print_status(format_args!("netfilum: unmounting {}", args.mount));
     host.unmount();
     host.stop();
+    let _ = watcher.join();
     Ok(())
 }
 
@@ -219,6 +233,7 @@ struct RpcFsContext {
     client: RpcClient,
     security_descriptor: Arc<Vec<u8>>,
     volume_label: String,
+    mount_state: Arc<MountState>,
 }
 
 #[derive(Debug)]
@@ -306,15 +321,12 @@ impl FileSystemContext for RpcFsContext {
             EntryKind::File
         };
 
-        let response = self
-            .client
-            .send(&Request::Create {
-                path: path.clone(),
-                kind,
-                file_attributes,
-                allocation_size,
-            })
-            .map_err(FspError::from)?;
+        let response = self.send_request(Request::Create {
+            path: path.clone(),
+            kind,
+            file_attributes,
+            allocation_size,
+        })?;
 
         let Response::Attr(attr) = response else {
             return Err(FspError::from(io::Error::other(
@@ -341,7 +353,7 @@ impl FileSystemContext for RpcFsContext {
                 path: context.path(),
             },
         };
-        let _ = self.client.send(&request);
+        let _ = self.send_request(request);
     }
 
     fn flush(
@@ -350,17 +362,13 @@ impl FileSystemContext for RpcFsContext {
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
         if let Some(context) = context {
-            self.client
-                .send(&Request::Flush {
-                    path: Some(context.path()),
-                })
-                .map_err(FspError::from)?;
+            self.send_request(Request::Flush {
+                path: Some(context.path()),
+            })?;
             let attr = self.fetch_attr(&context.path())?;
             fill_file_info(file_info, &attr);
         } else {
-            self.client
-                .send(&Request::Flush { path: None })
-                .map_err(FspError::from)?;
+            self.send_request(Request::Flush { path: None })?;
         }
         Ok(())
     }
@@ -428,13 +436,11 @@ impl FileSystemContext for RpcFsContext {
     ) -> winfsp::Result<()> {
         let old_path = context.path();
         let new_path = nt_path_to_relative(new_file_name);
-        self.client
-            .send(&Request::Rename {
-                path: old_path,
-                new_path: new_path.clone(),
-                replace_if_exists,
-            })
-            .map_err(FspError::from)?;
+        self.send_request(Request::Rename {
+            path: old_path,
+            new_path: new_path.clone(),
+            replace_if_exists,
+        })?;
         context.set_path(new_path);
         Ok(())
     }
@@ -449,19 +455,16 @@ impl FileSystemContext for RpcFsContext {
         change_time: u64,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        let response = self
-            .client
-            .send(&Request::SetBasicInfo {
-                path: context.path(),
-                update: BasicInfoUpdate {
-                    readonly: readonly_update_from_attributes(file_attributes),
-                    creation_time: wire_time_from_windows(creation_time),
-                    last_access_time: wire_time_from_windows(last_access_time),
-                    last_write_time: wire_time_from_windows(last_write_time),
-                    change_time: wire_time_from_windows(change_time),
-                },
-            })
-            .map_err(FspError::from)?;
+        let response = self.send_request(Request::SetBasicInfo {
+            path: context.path(),
+            update: BasicInfoUpdate {
+                readonly: readonly_update_from_attributes(file_attributes),
+                creation_time: wire_time_from_windows(creation_time),
+                last_access_time: wire_time_from_windows(last_access_time),
+                last_write_time: wire_time_from_windows(last_write_time),
+                change_time: wire_time_from_windows(change_time),
+            },
+        })?;
 
         let Response::Attr(attr) = response else {
             return Err(FspError::from(io::Error::other(
@@ -480,12 +483,10 @@ impl FileSystemContext for RpcFsContext {
         delete_file: bool,
     ) -> winfsp::Result<()> {
         if delete_file {
-            self.client
-                .send(&Request::CanDelete {
-                    path: context.path(),
-                    kind: context.kind,
-                })
-                .map_err(FspError::from)?;
+            self.send_request(Request::CanDelete {
+                path: context.path(),
+                kind: context.kind,
+            })?;
         }
 
         context.delete_pending.store(delete_file, Ordering::SeqCst);
@@ -499,14 +500,11 @@ impl FileSystemContext for RpcFsContext {
         set_allocation_size: bool,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        let response = self
-            .client
-            .send(&Request::SetLen {
-                path: context.path(),
-                size: new_size,
-                set_allocation_size,
-            })
-            .map_err(FspError::from)?;
+        let response = self.send_request(Request::SetLen {
+            path: context.path(),
+            size: new_size,
+            set_allocation_size,
+        })?;
 
         let Response::Attr(attr) = response else {
             return Err(FspError::from(io::Error::other(
@@ -524,14 +522,11 @@ impl FileSystemContext for RpcFsContext {
         buffer: &mut [u8],
         offset: u64,
     ) -> winfsp::Result<u32> {
-        let response = self
-            .client
-            .send(&Request::Read {
-                path: context.path(),
-                offset,
-                length: buffer.len() as u32,
-            })
-            .map_err(FspError::from)?;
+        let response = self.send_request(Request::Read {
+            path: context.path(),
+            offset,
+            length: buffer.len() as u32,
+        })?;
 
         let Response::Data(data) = response else {
             return Err(FspError::from(io::Error::other("unexpected read response")));
@@ -564,15 +559,12 @@ impl FileSystemContext for RpcFsContext {
             }
         }
 
-        let response = self
-            .client
-            .send(&Request::Write {
-                path: context.path(),
-                offset,
-                data: payload,
-                write_to_eof,
-            })
-            .map_err(FspError::from)?;
+        let response = self.send_request(Request::Write {
+            path: context.path(),
+            offset,
+            data: payload,
+            write_to_eof,
+        })?;
 
         let Response::WriteResult { written, attr } = response else {
             return Err(FspError::from(io::Error::other(
@@ -585,10 +577,7 @@ impl FileSystemContext for RpcFsContext {
     }
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
-        let response = self
-            .client
-            .send(&Request::GetVolumeInfo)
-            .map_err(FspError::from)?;
+        let response = self.send_request(Request::GetVolumeInfo)?;
 
         let Response::VolumeInfo(info) = response else {
             return Err(FspError::from(io::Error::other(
@@ -604,27 +593,25 @@ impl FileSystemContext for RpcFsContext {
 }
 
 impl RpcFsContext {
+    fn send_request(&self, request: Request) -> winfsp::Result<Response> {
+        self.client
+            .send(&request)
+            .map_err(|error| map_rpc_error(error, &self.mount_state))
+    }
+
     fn fetch_attr(&self, path: &str) -> winfsp::Result<FileAttr> {
-        match self
-            .client
-            .send(&Request::Stat {
-                path: path.to_string(),
-            })
-            .map_err(FspError::from)?
-        {
+        match self.send_request(Request::Stat {
+            path: path.to_string(),
+        })? {
             Response::Attr(attr) => Ok(attr),
             _ => Err(FspError::from(io::Error::other("unexpected attr response"))),
         }
     }
 
     fn fetch_dir_entries(&self, path: &str) -> winfsp::Result<Vec<DirEntry>> {
-        match self
-            .client
-            .send(&Request::ReadDir {
-                path: path.to_string(),
-            })
-            .map_err(FspError::from)?
-        {
+        match self.send_request(Request::ReadDir {
+            path: path.to_string(),
+        })? {
             Response::DirEntries(entries) => Ok(entries),
             _ => Err(FspError::from(io::Error::other(
                 "unexpected directory response",
@@ -633,18 +620,110 @@ impl RpcFsContext {
     }
 }
 
-fn wait_for_shutdown() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let keep_running = Arc::new(AtomicBool::new(true));
-    let signal = Arc::clone(&keep_running);
+#[derive(Debug, Default)]
+struct MountState {
+    stop: AtomicBool,
+    disconnect_message: Mutex<Option<String>>,
+}
+
+#[derive(Debug)]
+enum ShutdownReason {
+    Interrupted,
+    ServerDisconnected(String),
+}
+
+impl MountState {
+    fn report_disconnect(&self, message: String) {
+        let mut slot = self
+            .disconnect_message
+            .lock()
+            .expect("disconnect message lock poisoned");
+        if slot.is_none() {
+            *slot = Some(message);
+        }
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+fn spawn_connection_monitor(
+    addr: std::net::SocketAddr,
+    client: RpcClient,
+    mount_state: Arc<MountState>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(CONNECTION_PROBE_INTERVAL);
+            if mount_state.stop.load(Ordering::SeqCst) {
+                break;
+            }
+
+            match client.send(&Request::GetVolumeInfo) {
+                Ok(Response::VolumeInfo(_)) => {}
+                Ok(_) => mount_state.report_disconnect(format!(
+                    "netfilum: RPC server at {addr} returned an unexpected response"
+                )),
+                Err(error) if is_disconnect_error(&error) => mount_state.report_disconnect(
+                    format!("netfilum: lost connection to RPC server at {addr}: {error}"),
+                ),
+                Err(_) => {}
+            }
+
+            if mount_state.stop.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+    })
+}
+
+fn wait_for_shutdown(
+    mount_state: Arc<MountState>,
+) -> Result<ShutdownReason, Box<dyn std::error::Error + Send + Sync>> {
+    let signal = Arc::clone(&mount_state);
     ctrlc::set_handler(move || {
-        signal.store(false, Ordering::SeqCst);
+        signal.stop.store(true, Ordering::SeqCst);
     })?;
 
-    while keep_running.load(Ordering::SeqCst) {
+    while !mount_state.stop.load(Ordering::SeqCst) {
         thread::sleep(SHUTDOWN_POLL);
     }
 
-    Ok(())
+    let message = mount_state
+        .disconnect_message
+        .lock()
+        .expect("disconnect message lock poisoned")
+        .clone();
+    Ok(match message {
+        Some(message) => ShutdownReason::ServerDisconnected(message),
+        None => ShutdownReason::Interrupted,
+    })
+}
+
+fn map_rpc_error(error: io::Error, mount_state: &MountState) -> FspError {
+    if let Some(status) = disconnect_status(&error) {
+        mount_state.report_disconnect(format!("netfilum: lost connection to RPC server: {error}"));
+        return FspError::NTSTATUS(status.0);
+    }
+
+    FspError::from(error)
+}
+
+fn disconnect_status(error: &io::Error) -> Option<windows::Win32::Foundation::NTSTATUS> {
+    match error.kind() {
+        io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::BrokenPipe
+        | io::ErrorKind::NotConnected
+        | io::ErrorKind::UnexpectedEof => Some(STATUS_CONNECTION_DISCONNECTED),
+        io::ErrorKind::HostUnreachable => Some(STATUS_HOST_UNREACHABLE),
+        io::ErrorKind::NetworkUnreachable => Some(STATUS_NETWORK_UNREACHABLE),
+        io::ErrorKind::TimedOut => Some(STATUS_IO_TIMEOUT),
+        _ => None,
+    }
+}
+
+fn is_disconnect_error(error: &io::Error) -> bool {
+    disconnect_status(error).is_some()
 }
 
 fn write_special_dir_entry(
