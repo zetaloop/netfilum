@@ -141,6 +141,15 @@ impl RpcTransport {
             Self::Plaintext(stream) | Self::Encrypted { stream, .. } => stream,
         }
     }
+
+    pub(crate) fn clear_timeouts(&self) -> io::Result<()> {
+        match self {
+            Self::Plaintext(stream) | Self::Encrypted { stream, .. } => {
+                stream.set_read_timeout(None)?;
+                stream.set_write_timeout(None)
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -230,6 +239,7 @@ fn connect_transport(
     })?;
     let auth_result: RpcResult<()> = transport.receive()?;
     auth_result.map_err(|error| error.to_io_error())?;
+    transport.clear_timeouts()?;
     Ok(transport)
 }
 

@@ -124,6 +124,7 @@ impl RpcServer {
         let auth_result = self.authenticate(&auth);
         transport.send(&auth_result)?;
         auth_result.map_err(std::io::Error::from)?;
+        transport.clear_timeouts()?;
 
         match auth.kind {
             ConnectionKind::Data => loop {
@@ -141,8 +142,6 @@ impl RpcServer {
             },
             ConnectionKind::Monitor => {
                 let mut stream = transport.into_stream();
-                stream.set_read_timeout(None)?;
-                stream.set_write_timeout(None)?;
                 wait_for_monitor_disconnect(&mut stream)
             }
         }
