@@ -2,7 +2,7 @@ use crate::path::windows_path_to_wsl;
 use crate::protocol::{
     BasicInfoUpdate, DirEntry, EntryKind, FileAttr, FileTimeValue, Request, Response,
 };
-use crate::rpc::RpcClient;
+use crate::rpc::{MonitorConnection, RpcClient};
 use crate::{MountArgs, UpArgs, print_info, print_warn};
 use std::ffi::c_void;
 use std::io;
@@ -36,7 +36,6 @@ use winfsp_sys::{FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES};
 const WINDOWS_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
 const WINDOWS_TICKS_PER_SECOND: u64 = 10_000_000;
 const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
-const CONNECTION_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const FILE_DIRECTORY_FILE_FLAG: u32 = 0x0000_0001;
 
@@ -74,8 +73,7 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
         volume_label: volume_label.clone(),
         mount_state: Arc::clone(&mount_state),
     };
-    let watcher =
-        spawn_connection_monitor(args.addr, context.client.clone(), Arc::clone(&mount_state));
+    let watcher = spawn_connection_monitor(args.addr, &args.password, Arc::clone(&mount_state))?;
 
     let mut params = VolumeParams::new();
     params
@@ -109,10 +107,11 @@ pub fn run_mount(args: MountArgs) -> Result<(), Box<dyn std::error::Error + Send
     }
 
     mount_state.stop.store(true, Ordering::SeqCst);
+    watcher.stop();
     print_info(format_args!("netfilum: unmounting {}", args.mount));
     host.unmount();
     host.stop();
-    let _ = watcher.join();
+    watcher.join();
     Ok(())
 }
 
@@ -661,34 +660,52 @@ impl MountState {
     }
 }
 
+#[derive(Debug)]
+struct ConnectionMonitor {
+    shutdown: MonitorConnection,
+    thread: JoinHandle<()>,
+}
+
+impl ConnectionMonitor {
+    fn stop(&self) {
+        let _ = self.shutdown.shutdown();
+    }
+
+    fn join(self) {
+        let _ = self.thread.join();
+    }
+}
+
 fn spawn_connection_monitor(
     addr: std::net::SocketAddr,
-    client: RpcClient,
+    password: &str,
     mount_state: Arc<MountState>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            thread::sleep(CONNECTION_PROBE_INTERVAL);
-            if mount_state.stop.load(Ordering::SeqCst) {
-                break;
+) -> Result<ConnectionMonitor, Box<dyn std::error::Error + Send + Sync>> {
+    let monitor = MonitorConnection::connect(addr, password)?;
+    let shutdown = monitor
+        .try_clone()
+        .map_err(|error| format!("failed to clone monitor connection for {addr}: {error}"))?;
+    let thread = thread::spawn(move || {
+        let mut monitor = monitor;
+        match monitor.wait_for_disconnect() {
+            Ok(()) => {
+                if !mount_state.stop.load(Ordering::SeqCst) {
+                    mount_state.report_disconnect(format!(
+                        "netfilum: lost connection to RPC server at {addr}"
+                    ));
+                }
             }
-
-            match client.send(&Request::GetVolumeInfo) {
-                Ok(Response::VolumeInfo(_)) => {}
-                Ok(_) => mount_state.report_disconnect(format!(
-                    "netfilum: RPC server at {addr} returned an unexpected response"
-                )),
-                Err(error) if is_disconnect_error(&error) => mount_state.report_disconnect(
-                    format!("netfilum: lost connection to RPC server at {addr}: {error}"),
-                ),
-                Err(_) => {}
-            }
-
-            if mount_state.stop.load(Ordering::SeqCst) {
-                break;
-            }
+            Err(error) if mount_state.stop.load(Ordering::SeqCst) => {}
+            Err(error) if is_disconnect_error(&error) => mount_state.report_disconnect(format!(
+                "netfilum: lost connection to RPC server at {addr}: {error}"
+            )),
+            Err(error) => mount_state.report_disconnect(format!(
+                "netfilum: monitor connection failed at {addr}: {error}"
+            )),
         }
-    })
+    });
+
+    Ok(ConnectionMonitor { shutdown, thread })
 }
 
 fn wait_for_shutdown(

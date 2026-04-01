@@ -4,11 +4,16 @@ use crate::protocol::{Request, Response, RpcResult};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use pbkdf2::pbkdf2_hmac_array;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::io::{self, Read, Write};
 #[cfg(windows)]
-use std::net::{SocketAddr, TcpStream};
+use socket2::SockRef;
+use std::io::{self, Read, Write};
+#[cfg(not(windows))]
+use std::net::TcpStream;
+#[cfg(windows)]
+use std::net::{Shutdown, SocketAddr, TcpStream};
 #[cfg(windows)]
 use std::sync::{Arc, Mutex};
 #[cfg(windows)]
@@ -29,6 +34,15 @@ pub struct RpcClient {
     session: Arc<Mutex<Option<RpcSession>>>,
 }
 
+#[derive(Debug)]
+pub(crate) enum RpcTransport {
+    Plaintext(TcpStream),
+    Encrypted {
+        stream: TcpStream,
+        key: [u8; KEY_LEN],
+    },
+}
+
 #[cfg(windows)]
 #[derive(Debug)]
 struct RpcSession {
@@ -37,17 +51,14 @@ struct RpcSession {
 
 #[cfg(windows)]
 #[derive(Debug)]
-enum RpcTransport {
-    Plaintext(TcpStream),
-    Encrypted {
-        stream: TcpStream,
-        key: [u8; KEY_LEN],
-    },
+pub struct MonitorConnection {
+    stream: TcpStream,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AuthRequest {
     pub token: [u8; 16],
+    pub kind: ConnectionKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +70,12 @@ pub(crate) struct ServerHello {
 pub(crate) enum TransportMode {
     Plaintext,
     Encrypted { salt: [u8; SALT_LEN] },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ConnectionKind {
+    Data,
+    Monitor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,50 +120,116 @@ impl RpcClient {
     }
 }
 
+impl RpcTransport {
+    pub(crate) fn send<T: serde::Serialize>(&mut self, value: &T) -> io::Result<()> {
+        match self {
+            Self::Plaintext(stream) => write_message(stream, value),
+            Self::Encrypted { stream, key } => write_encrypted_message(stream, key, value),
+        }
+    }
+
+    pub(crate) fn receive<T: DeserializeOwned>(&mut self) -> io::Result<T> {
+        match self {
+            Self::Plaintext(stream) => read_message(stream),
+            Self::Encrypted { stream, key } => read_encrypted_message(stream, key),
+        }
+    }
+
+    pub(crate) fn into_stream(self) -> TcpStream {
+        match self {
+            Self::Plaintext(stream) | Self::Encrypted { stream, .. } => stream,
+        }
+    }
+}
+
 #[cfg(windows)]
 impl RpcSession {
     fn connect(addr: SocketAddr, timeout: Duration, password: &str) -> io::Result<Self> {
-        let mut stream = TcpStream::connect(addr)?;
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-
-        let hello: ServerHello = read_message(&mut stream)?;
-        let transport = match hello.transport {
-            TransportMode::Plaintext => {
-                if password.is_empty() {
-                    RpcTransport::Plaintext(stream)
-                } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "server is using plaintext transport but client was configured with a password",
-                    ));
-                }
-            }
-            TransportMode::Encrypted { salt } => {
-                let key = derive_transport_key(password, &salt);
-                write_encrypted_message(&mut stream, &key, &AuthRequest { token: AUTH_TOKEN })?;
-                let auth_result: RpcResult<()> = read_message(&mut stream)?;
-                auth_result.map_err(|error| error.to_io_error())?;
-                RpcTransport::Encrypted { stream, key }
-            }
-        };
-
+        let transport = connect_transport(addr, timeout, password, ConnectionKind::Data)?;
         Ok(Self { transport })
     }
 
     fn send(&mut self, request: &Request) -> io::Result<RpcResult<Response>> {
-        match &mut self.transport {
-            RpcTransport::Plaintext(stream) => {
-                write_message(stream, request)?;
-                read_message(stream)
-            }
-            RpcTransport::Encrypted { stream, key } => {
-                write_encrypted_message(stream, key, request)?;
-                read_encrypted_message(stream, key)
+        self.transport.send(request)?;
+        self.transport.receive()
+    }
+}
+
+#[cfg(windows)]
+impl MonitorConnection {
+    pub fn connect(addr: SocketAddr, password: &str) -> io::Result<Self> {
+        let transport = connect_transport(
+            addr,
+            Duration::from_secs(5),
+            password,
+            ConnectionKind::Monitor,
+        )?;
+        let stream = transport.into_stream();
+        stream.set_read_timeout(None)?;
+        stream.set_write_timeout(None)?;
+        SockRef::from(&stream).set_keepalive(true)?;
+        Ok(Self { stream })
+    }
+
+    pub fn wait_for_disconnect(&mut self) -> io::Result<()> {
+        let mut buffer = [0u8; 1];
+        loop {
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(error) => return Err(error),
             }
         }
     }
+
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.stream.shutdown(Shutdown::Both)
+    }
+
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            stream: self.stream.try_clone()?,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn connect_transport(
+    addr: SocketAddr,
+    timeout: Duration,
+    password: &str,
+    kind: ConnectionKind,
+) -> io::Result<RpcTransport> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
+    let hello: ServerHello = read_message(&mut stream)?;
+    let mut transport = match hello.transport {
+        TransportMode::Plaintext => {
+            if password.is_empty() {
+                RpcTransport::Plaintext(stream)
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "server is using plaintext transport but client was configured with a password",
+                ));
+            }
+        }
+        TransportMode::Encrypted { salt } => {
+            let key = derive_transport_key(password, &salt);
+            RpcTransport::Encrypted { stream, key }
+        }
+    };
+
+    transport.send(&AuthRequest {
+        token: AUTH_TOKEN,
+        kind,
+    })?;
+    let auth_result: RpcResult<()> = transport.receive()?;
+    auth_result.map_err(|error| error.to_io_error())?;
+    Ok(transport)
 }
 
 pub(crate) fn derive_transport_key(password: &str, salt: &[u8; SALT_LEN]) -> [u8; KEY_LEN] {

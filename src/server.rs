@@ -5,8 +5,8 @@ use crate::protocol::{
     RpcResult, VolumeInfoData,
 };
 use crate::rpc::{
-    AUTH_TOKEN, AuthRequest, ServerHello, TransportMode, derive_transport_key, random_bytes,
-    read_encrypted_message, write_encrypted_message, write_message,
+    AUTH_TOKEN, AuthRequest, ConnectionKind, RpcTransport, ServerHello, TransportMode,
+    derive_transport_key, random_bytes, write_message,
 };
 use crate::{print_error, print_info, print_warn};
 use filetime::{FileTime, set_file_times};
@@ -102,44 +102,48 @@ impl RpcServer {
             },
         };
         write_message(&mut stream, &hello)?;
-        if let TransportMode::Encrypted { salt } = hello.transport {
-            let key = derive_transport_key(&self.password, &salt);
-            let auth_result = match read_encrypted_message::<AuthRequest>(&mut stream, &key) {
-                Ok(auth) => self.authenticate(&auth),
-                Err(_) => Err(RpcError::new(
+        let mut transport = match hello.transport {
+            TransportMode::Plaintext => RpcTransport::Plaintext(stream),
+            TransportMode::Encrypted { salt } => RpcTransport::Encrypted {
+                stream,
+                key: derive_transport_key(&self.password, &salt),
+            },
+        };
+
+        let auth = match transport.receive::<AuthRequest>() {
+            Ok(auth) => auth,
+            Err(_) => {
+                let error = RpcError::new(
                     crate::protocol::ErrorCode::PermissionDenied,
                     "invalid password",
-                )),
-            };
-            write_message(&mut stream, &auth_result)?;
-            auth_result.map_err(std::io::Error::from)?;
-
-            loop {
-                let request: Request = match read_encrypted_message(&mut stream, &key) {
-                    Ok(request) => request,
-                    Err(error) if is_client_disconnect(&error) => return Ok(()),
-                    Err(error) => return Err(error),
-                };
-                let response = self.dispatch(request);
-                match write_encrypted_message(&mut stream, &key, &response) {
-                    Ok(()) => {}
-                    Err(error) if is_client_disconnect(&error) => return Ok(()),
-                    Err(error) => return Err(error),
-                }
+                );
+                transport.send(&Err::<(), _>(error.clone()))?;
+                return Err(std::io::Error::from(error));
             }
-        } else {
-            loop {
-                let request: Request = match crate::rpc::read_message(&mut stream) {
+        };
+        let auth_result = self.authenticate(&auth);
+        transport.send(&auth_result)?;
+        auth_result.map_err(std::io::Error::from)?;
+
+        match auth.kind {
+            ConnectionKind::Data => loop {
+                let request: Request = match transport.receive() {
                     Ok(request) => request,
                     Err(error) if is_client_disconnect(&error) => return Ok(()),
                     Err(error) => return Err(error),
                 };
                 let response = self.dispatch(request);
-                match write_message(&mut stream, &response) {
+                match transport.send(&response) {
                     Ok(()) => {}
                     Err(error) if is_client_disconnect(&error) => return Ok(()),
                     Err(error) => return Err(error),
                 }
+            },
+            ConnectionKind::Monitor => {
+                let mut stream = transport.into_stream();
+                stream.set_read_timeout(None)?;
+                stream.set_write_timeout(None)?;
+                wait_for_monitor_disconnect(&mut stream)
             }
         }
     }
@@ -487,6 +491,18 @@ fn is_client_disconnect(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::BrokenPipe
             | std::io::ErrorKind::UnexpectedEof
     )
+}
+
+fn wait_for_monitor_disconnect(stream: &mut TcpStream) -> std::io::Result<()> {
+    let mut buffer = [0u8; 1];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error) if is_client_disconnect(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn expand_root(raw: &str) -> PathBuf {
