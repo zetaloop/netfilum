@@ -118,8 +118,10 @@ impl RpcServer {
             Request::SetLen {
                 path,
                 size,
-                set_allocation_size: _,
-            } => self.set_len(&path, size).map(Response::Attr),
+                set_allocation_size,
+            } => self
+                .set_len(&path, size, set_allocation_size)
+                .map(Response::Attr),
             Request::Flush { path } => {
                 self.flush(path.as_deref())?;
                 Ok(Response::Empty)
@@ -144,7 +146,7 @@ impl RpcServer {
         &self,
         relative: &str,
         kind: EntryKind,
-        allocation_size: u64,
+        _allocation_size: u64,
     ) -> RpcResult<FileAttr> {
         let path = self.resolve_for_new_path(relative)?;
         match kind {
@@ -154,9 +156,6 @@ impl RpcServer {
                     .create_new(true)
                     .open(&path)
                     .map_err(RpcError::from)?;
-                if allocation_size > 0 {
-                    file.set_len(allocation_size).map_err(RpcError::from)?;
-                }
                 file.flush().map_err(RpcError::from)?;
             }
             EntryKind::Directory => fs::create_dir(&path).map_err(RpcError::from)?,
@@ -282,13 +281,15 @@ impl RpcServer {
         fs::rename(from_path, to_path).map_err(RpcError::from)
     }
 
-    fn set_len(&self, relative: &str, size: u64) -> RpcResult<FileAttr> {
+    fn set_len(&self, relative: &str, size: u64, set_allocation_size: bool) -> RpcResult<FileAttr> {
         let path = self.resolve_existing(relative)?;
-        let file = OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(RpcError::from)?;
-        file.set_len(size).map_err(RpcError::from)?;
+        if !set_allocation_size {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(RpcError::from)?;
+            file.set_len(size).map_err(RpcError::from)?;
+        }
         self.attr_for_path(&path)
     }
 
