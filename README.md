@@ -14,14 +14,14 @@
 ```mermaid
 flowchart LR
     A["Windows 应用<br/>资源管理器 / 编辑器"] --> B["netfilum<br/>WinFsp 挂载客户端"]
-    B --> C["自定义 RPC<br/>TCP + bincode"]
+    B --> C["自定义 RPC<br/>密码认证 + 加密传输"]
     C --> D["netfilumd<br/>Linux / WSL 服务端"]
     D --> E["导出目录<br/>std::fs"]
 ```
 
 核心分工可以简单理解成这样：
 
-- `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射，是这个项目自己实现的
+- `netfilum` 和 `netfilumd` 之间的 RPC 协议、请求分发、路径约束、文件语义映射、密码认证、加密传输，是这个项目自己实现的
 - WinFsp 负责把 Windows 用户态文件系统接到盘符上，让 `netfilum` 能作为一个可挂载盘工作
 - `serde` 和 `bincode` 负责消息编解码，`clap` 负责命令行解析，`filetime` 负责时间戳设置
 - 服务端真正落到磁盘上的文件操作，底层使用的是 Rust 标准库 `std::fs`
@@ -30,8 +30,10 @@ flowchart LR
 
 - Windows 侧已安装 WinFsp
 - 客户端能够连到服务端的地址和端口
+- 使用 `netfilum up` 时，`netfilum.exe` 和 `netfilumd` 需要位于同一目录，并且该目录能被 WSL 访问
 
 默认地址是 `127.0.0.1:4040`，默认卷标是 `netfilum`。
+默认密码是空字符串。此时仍会启用加密传输，但客户端和服务端都会输出警告。
 
 ## 从源码构建
 
@@ -59,13 +61,13 @@ cargo build --release --bin netfilumd
 先在 Linux / WSL 上启动服务端：
 
 ```bash
-netfilumd --root /home/$USER/netfilum-root --addr 127.0.0.1:4040 --volume-label netfilum
+netfilumd --root /home/$USER/netfilum-root --addr 127.0.0.1:4040 --volume-label netfilum --password demo-pass
 ```
 
 再在 Windows 上挂载盘符：
 
 ```bash
-netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum
+netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum --password demo-pass
 ```
 
 如果服务端在另一台 Linux 机器上，把 `127.0.0.1:4040` 换成可达地址即可。
@@ -75,7 +77,7 @@ netfilum mount --addr 127.0.0.1:4040 --mount N: --volume-label netfilum
 同机 Windows + WSL 场景可以直接用：
 
 ```bash
-netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 127.0.0.1:4040
+netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 127.0.0.1:4040 --password demo-pass
 ```
 
 这条命令会：
@@ -85,7 +87,11 @@ netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 1
 3. 在 Windows 上挂载盘符
 4. 当前进程结束时卸载盘符并停止刚刚拉起的服务端
 
-使用 `up` 时，需要把 Windows 客户端 `netfilum.exe` 和 Linux / WSL 服务端 `netfilumd` 放在同一个目录里，并且该目录能被 WSL 访问到。
+## 运行行为
+
+- `netfilum mount` 和 `netfilum up` 都以前台进程形式保持挂载，按 `Ctrl+C` 会卸载盘符
+- 如果 RPC 服务端断开，客户端会检测到连接中断并自动执行卸载
+- Windows 侧显示的卷总容量和可用容量来自服务端导出目录所在文件系统
 
 ## 说明
 
@@ -95,6 +101,6 @@ netfilum up --distro Ubuntu --root /home/$USER/netfilum-root --mount N: --addr 1
 
 - 单用户
 - 单客户端挂载
-- 无认证
+- 共享密码模型
 - 无文件锁
 - 无 symlink / hardlink / mmap
